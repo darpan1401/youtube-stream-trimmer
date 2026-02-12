@@ -163,21 +163,36 @@ if st.button("⬇ TRIM & DOWNLOAD", type="primary", width="stretch"):
             try:
                 t0 = time.time()
                 with tempfile.TemporaryDirectory() as tmpdir:
+
+                    full_video_path = os.path.join(tmpdir, "full_video.mp4")
                     output_path = os.path.join(tmpdir, f"{output_name}.mp4")
 
-                    logger.info("Starting yt-dlp partial download")
+                    logger.info("Downloading full video")
+
+                    # STEP 1: Download full video
                     subprocess.run(
                         [
                             "yt-dlp",
                             "-f", quality_map[quality],
-                            "--download-sections",
-                            f"*{start_sec}-{end_sec}",
                             "--merge-output-format", "mp4",
-                            "--concurrent-fragments", "8",
-                            "--retries", "5",
-                            "--fragment-retries", "5",
-                            "-o", output_path,
+                            "-o", full_video_path,
                             url
+                        ],
+                        check=True
+                    )
+
+                    logger.info("Trimming video using ffmpeg")
+
+                    # STEP 2: Trim using ffmpeg (fast copy mode)
+                    subprocess.run(
+                        [
+                            "ffmpeg",
+                            "-ss", str(start_sec),
+                            "-to", str(end_sec),
+                            "-i", full_video_path,
+                            "-c", "copy",
+                            "-avoid_negative_ts", "1",
+                            output_path
                         ],
                         check=True
                     )
@@ -191,9 +206,11 @@ if st.button("⬇ TRIM & DOWNLOAD", type="primary", width="stretch"):
                     f"| Time taken={round(time.time()-t0,2)}s"
                 )
 
-            except Exception:
+            except subprocess.CalledProcessError as e:
                 logger.error(traceback.format_exc())
                 st.error("Processing failed.")
+                if e.stderr:
+                    st.error(e.stderr)
 
     if st.session_state.output_bytes:
         st.download_button(
@@ -203,6 +220,7 @@ if st.button("⬇ TRIM & DOWNLOAD", type="primary", width="stretch"):
             mime="video/mp4",
             width="stretch"
         )
+
 
 # ---------------- FOOTER ----------------
 st.markdown("---")
