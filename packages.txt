@@ -1,2 +1,4 @@
 nodejs
 ffmpeg
+yt-dlp
+python3
