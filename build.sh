@@ -3,7 +3,7 @@
 
 set -e  # Exit on any error
 
-echo "🔨 Building YouTube Trimmer Pro..."
+echo "=== Building YouTube Trimmer Pro ==="
 
 # Update pip
 echo "- Updating pip..."
@@ -13,20 +13,22 @@ pip install --upgrade pip
 echo "- Installing Python packages..."
 pip install -r requirements.txt
 
-# Upgrade yt-dlp to latest version
-echo "- Installing/upgrading yt-dlp..."
+# Upgrade yt-dlp to LATEST version (critical for YouTube compatibility)
+echo "- Installing/upgrading yt-dlp to latest..."
 pip install --upgrade yt-dlp
 
 # Verify installations
 echo "- Verifying installations..."
-python -c "import flask; print(f'Flask {flask.__version__} ✓')"
-python -c "import yt_dlp; print(f'yt-dlp found ✓')"
+python -c "import flask; print(f'Flask {flask.__version__} OK')"
+yt_dlp_ver=$(yt-dlp --version 2>/dev/null || echo 'NOT FOUND')
+echo "yt-dlp version: $yt_dlp_ver"
+ffmpeg_ver=$(ffmpeg -version 2>/dev/null | head -1 || echo 'NOT FOUND')
+echo "ffmpeg: $ffmpeg_ver"
 
 # Compile Python files
 echo "- Compiling Python files..."
 python -m py_compile app_new.py wsgi.py
 
-echo "✅ Build complete!"
-echo ""
-echo "Your app is ready for production."
+echo "=== Build complete ==="
+echo "yt-dlp: $yt_dlp_ver"
 echo "Start command: gunicorn wsgi:app"

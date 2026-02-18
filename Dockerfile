@@ -18,8 +18,12 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copy app code
 COPY . .
 
+# Copy and set up entrypoint script
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
 # Expose port
 EXPOSE 2000
 
-# Use gunicorn with threading support for SSE
-CMD ["gunicorn", "--bind", "0.0.0.0:2000", "--workers", "2", "--threads", "4", "--timeout", "600", "wsgi:app"]
+# Use entrypoint to update yt-dlp at container start, then launch gunicorn
+ENTRYPOINT ["/app/entrypoint.sh"]

@@ -4,8 +4,11 @@ services:
     runtime: docker
     plan: free
     dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
     envVars:
       - key: FLASK_ENV
         value: production
       - key: PORT
         value: "2000"
+      - key: PYTHONUNBUFFERED
+        value: "1"
