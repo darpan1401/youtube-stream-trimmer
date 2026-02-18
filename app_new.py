@@ -64,6 +64,25 @@ try:
 except Exception as e:
     logger.critical(f"ffmpeg NOT FOUND or broken: {e}")
 
+# Check Node.js availability (needed by PO token provider)
+try:
+    _node_version = subprocess.run(
+        ['node', '--version'], capture_output=True, text=True, timeout=10
+    )
+    logger.info(f"Node.js version: {_node_version.stdout.strip()}")
+except Exception as e:
+    logger.warning(f"Node.js not found: {e} (PO token provider won't work)")
+
+# Check PO token provider
+POT_PROVIDER_AVAILABLE = False
+try:
+    import bgutil_ytdlp_pot_provider
+    POT_PROVIDER_AVAILABLE = True
+    logger.info("PO Token Provider: INSTALLED (auto bot-bypass enabled)")
+except ImportError:
+    logger.warning("PO Token Provider NOT installed — YouTube may block server requests")
+    logger.warning("Install with: pip install bgutil-ytdlp-pot-provider")
+
 logger.info("="*60)
 
 # Temporary directory for downloads
@@ -93,7 +112,7 @@ def sanitize_filename(filename):
     filename = str(filename)[:100]  # Limit to 100 chars
     return re.sub(r'[<>:"/\\|?*]', '_', filename)
 
-def get_ytdlp_base_args():
+def get_ytdlp_base_args(player_client=None):
     """Return common yt-dlp arguments with anti-bot measures"""
     args = [
         'yt-dlp',
@@ -101,14 +120,79 @@ def get_ytdlp_base_args():
         '--no-playlist',
         '--socket-timeout', '30',
         '--extractor-retries', '5',
-        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-        '--extractor-args', 'youtube:player_client=mweb,default',
     ]
+    # Set player client for YouTube anti-bot bypass
+    if player_client:
+        args.extend(['--extractor-args', f'youtube:player_client={player_client}'])
     # Use cookies if available — critical for server deployments
     if os.path.exists(COOKIES_FILE):
         args.extend(['--cookies', COOKIES_FILE])
         logger.debug("Using cookies.txt for YouTube authentication")
     return args
+
+# Player client strategies to try (in order)
+# PO token provider works best with 'web' client
+# Fallback clients that sometimes bypass bot detection without cookies
+PLAYER_CLIENT_STRATEGIES = [
+    'web',           # Default web client (PO token provider handles auth)
+    'mweb',          # Mobile web — sometimes bypasses bot checks  
+    'tv_embedded',   # TV embedded player — often works on datacenter IPs
+    'mediaconnect',  # Media connect client
+]
+
+def run_ytdlp_with_retry(extra_args, url, timeout=60, description="yt-dlp"):
+    """
+    Run yt-dlp with automatic retry using different player clients.
+    Returns (success, result) tuple.
+    """
+    last_result = None
+    last_stderr = ""
+    
+    for i, client in enumerate(PLAYER_CLIENT_STRATEGIES):
+        cmd = get_ytdlp_base_args(player_client=client) + extra_args + [url]
+        
+        if i == 0:
+            logger.info(f"{description}: Trying player_client={client} | URL: {url}")
+        else:
+            logger.info(f"{description}: Retry #{i} with player_client={client} | URL: {url}")
+        
+        logger.debug(f"Command: {' '.join(cmd)}")
+        
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout
+            )
+            last_result = result
+            
+            if result.returncode == 0:
+                logger.info(f"{description}: SUCCESS with player_client={client}")
+                return True, result
+            
+            last_stderr = result.stderr.strip() if result.stderr else ''
+            logger.warning(f"{description}: FAILED with player_client={client} | Exit: {result.returncode} | Error: {last_stderr[:200]}")
+            
+            # Only retry on bot-detection / auth errors
+            stderr_lower = last_stderr.lower()
+            is_bot_error = any(kw in stderr_lower for kw in ['sign in', 'bot', 'confirm', 'cookies', 'authentication'])
+            
+            if not is_bot_error:
+                # Not a bot error — no point retrying with different client
+                logger.info(f"{description}: Error is not bot-related, skipping further retries")
+                break
+        
+        except subprocess.TimeoutExpired:
+            logger.error(f"{description}: TIMEOUT with player_client={client} after {timeout}s")
+            last_result = None
+            last_stderr = f"Timeout after {timeout}s"
+            continue
+    
+    # All retries failed
+    logger.error(f"{description}: ALL player clients failed for URL: {url}")
+    logger.error(f"{description}: Last stderr: {last_stderr}")
+    return False, last_result
 
 # ==================== ERROR HANDLER ====================
 def error_handler(f):
@@ -159,30 +243,19 @@ def get_video_info():
     logger.info(f"Fetching video info | URL: {url} | IP: {request.remote_addr}")
     
     try:
-        cmd = get_ytdlp_base_args() + [
-            '--dump-json',
-            '--no-warnings',
-            url
-        ]
-        logger.debug(f"Running command: {' '.join(cmd)}")
+        extra_args = ['--dump-json', '--no-warnings']
         
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=60  # Increased timeout for slow Render instances
+        success, result = run_ytdlp_with_retry(
+            extra_args, url, timeout=60, description="get_video_info"
         )
         
-        if result.returncode != 0:
-            stderr_output = result.stderr.strip() if result.stderr else 'No stderr output'
-            stdout_output = result.stdout.strip()[:500] if result.stdout else 'No stdout output'
-            logger.error(f"yt-dlp FAILED for URL: {url}")
-            logger.error(f"yt-dlp exit code: {result.returncode}")
-            logger.error(f"yt-dlp stderr: {stderr_output}")
-            logger.error(f"yt-dlp stdout (first 500 chars): {stdout_output}")
+        if not success:
+            if result is None:
+                return jsonify({"error": "Request timeout. The server is slow — please try again."}), 408
             
-            # Try to give a more specific error message
+            stderr_output = result.stderr.strip() if result and result.stderr else 'Unknown error'
             stderr_lower = stderr_output.lower()
+            
             if 'sign in' in stderr_lower or 'bot' in stderr_lower:
                 if os.path.exists(COOKIES_FILE):
                     error_msg = "YouTube bot detection triggered. Your cookies.txt may be expired — please re-export from browser."
@@ -226,12 +299,9 @@ def get_video_info():
             "uploader": uploader
         })
     
-    except subprocess.TimeoutExpired:
-        logger.error(f"TIMEOUT fetching video info after 60s | URL: {url}")
-        return jsonify({"error": "Request timeout. The server is slow — please try again."}), 408
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse yt-dlp JSON output | URL: {url} | Error: {e}")
-        logger.error(f"Raw stdout (first 500 chars): {result.stdout[:500] if result.stdout else 'empty'}")
+        logger.error(f"Raw stdout (first 500 chars): {result.stdout[:500] if result and result.stdout else 'empty'}")
         return jsonify({"error": "Failed to parse video information"}), 400
     except FileNotFoundError:
         logger.critical("yt-dlp binary NOT FOUND on this system!")
@@ -310,7 +380,34 @@ def start_trim():
     def run_ytdlp():
         try:
             logger.info(f"Task {task_id}: Background thread started")
-            cmd = get_ytdlp_base_args() + [
+            
+            # Try different player clients for the download
+            download_cmd = None
+            for client_idx, client in enumerate(PLAYER_CLIENT_STRATEGIES):
+                test_cmd = get_ytdlp_base_args(player_client=client) + [
+                    '--dump-json', '--no-warnings', url
+                ]
+                logger.info(f"Task {task_id}: Testing player_client={client}")
+                try:
+                    test = subprocess.run(test_cmd, capture_output=True, text=True, timeout=30)
+                    if test.returncode == 0:
+                        logger.info(f"Task {task_id}: player_client={client} works!")
+                        download_cmd = get_ytdlp_base_args(player_client=client)
+                        break
+                    else:
+                        stderr_l = (test.stderr or '').lower()
+                        if not any(kw in stderr_l for kw in ['sign in', 'bot', 'confirm', 'cookies']):
+                            logger.info(f"Task {task_id}: Non-bot error with {client}, using it anyway")
+                            download_cmd = get_ytdlp_base_args(player_client=client)
+                            break
+                except subprocess.TimeoutExpired:
+                    pass
+            
+            if download_cmd is None:
+                download_cmd = get_ytdlp_base_args(player_client='web')
+                logger.warning(f"Task {task_id}: All clients failed pre-check, falling back to web")
+            
+            cmd = download_cmd + [
                 '-f', quality_map.get(quality, quality_map['best']),
                 '--download-sections', f'*{start_time}-{end_time}',
                 '--concurrent-fragments', '16',
@@ -318,7 +415,7 @@ def start_trim():
                 '--retries', '5',
                 '--buffer-size', '16K',
                 '--no-warnings',
-                '--newline',  # Progress on separate lines for real-time parsing
+                '--newline',
                 '--progress-template', '%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress._total_bytes_str)s|%(progress._downloaded_bytes_str)s',
             ]
             
@@ -614,7 +711,7 @@ def trim_video():
             file_ext = 'mp3' if is_audio else 'mp4'
             output_path = os.path.join(tmpdir, f"{filename}.{file_ext}")
             
-            cmd = get_ytdlp_base_args() + [
+            cmd = get_ytdlp_base_args(player_client='web') + [
                 '-f', quality_map.get(quality, quality_map['best']),
                 '--download-sections', f'*{start_time}-{end_time}',
                 '--concurrent-fragments', '16',
@@ -732,13 +829,15 @@ def health():
         "status": status,
         "yt_dlp": {"installed": ytdlp_ok, "version": ytdlp_version},
         "ffmpeg": {"installed": ffmpeg_ok},
+        "pot_provider": {"installed": POT_PROVIDER_AVAILABLE},
+        "cookies": {"has_cookies": os.path.exists(COOKIES_FILE)},
         "disk_free_mb": round(disk_free_mb, 1),
         "active_tasks": active_tasks,
         "temp_dir": TEMP_DIR,
         "timestamp": datetime.now().isoformat()
     }
     
-    logger.info(f"Health check | Status: {status} | yt-dlp: {ytdlp_version} | Disk free: {disk_free_mb:.0f} MB | Active tasks: {active_tasks}")
+    logger.info(f"Health check | Status: {status} | yt-dlp: {ytdlp_version} | POT: {POT_PROVIDER_AVAILABLE} | Cookies: {os.path.exists(COOKIES_FILE)} | Disk free: {disk_free_mb:.0f} MB | Active tasks: {active_tasks}")
     
     return jsonify(health_data), 200 if status == 'ok' else 503
 

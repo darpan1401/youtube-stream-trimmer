@@ -1,8 +1,10 @@
 FROM python:3.11-slim
 
-# Install system dependencies (ffmpeg for video processing)
+# Install system dependencies (ffmpeg for video processing, Node.js for PO token generation)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg && \
+    apt-get install -y --no-install-recommends ffmpeg curl && \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -13,7 +15,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --root-user-action=ignore --no-cache-dir --upgrade pip && \
     pip install --root-user-action=ignore --no-cache-dir -r requirements.txt && \
-    pip install --root-user-action=ignore --no-cache-dir --upgrade yt-dlp
+    pip install --root-user-action=ignore --no-cache-dir --upgrade yt-dlp && \
+    pip install --root-user-action=ignore --no-cache-dir bgutil-ytdlp-pot-provider
 
 # Copy app code
 COPY . .
