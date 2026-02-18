@@ -536,23 +536,19 @@ downloadBtn.addEventListener('click', async () => {
             };
         });
 
-        // Step 3: Download the file — use direct browser download (no fetch+blob)
+        // Step 3: Download the file
         removeAlert(loadingAlert);
 
-        const a = document.createElement('a');
-        a.href = `/api/download/${taskId}`;
-        a.download = filename + fileExt;
-        a.style.display = 'none';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
+        // Use window.location to trigger native browser download
+        // Server sends Content-Disposition: attachment so page won't navigate away
+        window.location.href = `/api/download/${taskId}`;
 
         showAlert(`Download Started!<br><span style="font-size:0.85rem;color:var(--text-secondary)">File: ${filename}${fileExt} — check your browser downloads</span>`, 'success', 6000);
 
-        // Cleanup server-side temp files (delay to let download begin)
+        // Cleanup server-side temp files (delay to let download complete)
         setTimeout(() => {
             fetch(`/api/cleanup/${taskId}`, { method: 'POST' }).catch(() => {});
-        }, 30000);
+        }, 120000);
 
     } catch (error) {
         removeAlert(loadingAlert);
