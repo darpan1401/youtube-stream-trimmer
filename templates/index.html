@@ -7,7 +7,7 @@
     <title>YouTube Video Trimmer Pro</title>
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=4">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=5">
 </head>
 <body>
     <div class="background-animation"></div>
@@ -22,7 +22,43 @@
                     <p class="subtitle">Clean • Fast • Offline</p>
                 </div>
             </div>
+            <button class="btn-settings" id="settingsBtn" title="Settings">
+                <i class="fas fa-cog"></i>
+            </button>
         </header>
+
+        <!-- Cookies Settings Modal -->
+        <div id="cookiesModal" class="modal-overlay hidden">
+            <div class="modal-content card">
+                <div class="modal-header">
+                    <h3><i class="fas fa-cookie-bite"></i> YouTube Cookies</h3>
+                    <button class="modal-close" id="closeModal">&times;</button>
+                </div>
+                <div class="cookies-status" id="cookiesStatus">
+                    <div class="status-dot" id="statusDot"></div>
+                    <span id="statusText">Checking...</span>
+                </div>
+                <p class="cookies-info">
+                    YouTube blocks server requests. Upload <strong>cookies.txt</strong> from your browser to fix this.
+                </p>
+                <div class="cookies-steps">
+                    <p><strong>How to get cookies.txt:</strong></p>
+                    <ol>
+                        <li>Install <a href="https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc" target="_blank">Get cookies.txt LOCALLY</a> extension</li>
+                        <li>Go to <a href="https://youtube.com" target="_blank">youtube.com</a> and sign in</li>
+                        <li>Click the extension icon → Export</li>
+                        <li>Upload the downloaded file below</li>
+                    </ol>
+                </div>
+                <div class="cookies-upload">
+                    <input type="file" id="cookiesFile" accept=".txt" class="hidden">
+                    <button class="btn btn-primary" id="uploadCookiesBtn">
+                        <i class="fas fa-upload"></i> Upload cookies.txt
+                    </button>
+                    <span id="uploadStatus" class="upload-status"></span>
+                </div>
+            </div>
+        </div>
 
         <!-- Main Content -->
         <main class="main-content">
@@ -177,6 +213,6 @@
         </footer>
     </div>
 
-    <script src="{{ url_for('static', filename='script.js') }}?v=4"></script>
+    <script src="{{ url_for('static', filename='script.js') }}?v=5"></script>
 </body>
 </html>

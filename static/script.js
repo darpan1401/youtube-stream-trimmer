@@ -607,4 +607,91 @@ window.addEventListener('load', () => {
     if (videoUrlInput.value) {
         loadBtn.click();
     }
+    // Check cookies status on load
+    checkCookiesStatus();
+});
+
+// ==================== COOKIES SETTINGS ====================
+const settingsBtn = document.getElementById('settingsBtn');
+const cookiesModal = document.getElementById('cookiesModal');
+const closeModal = document.getElementById('closeModal');
+const uploadCookiesBtn = document.getElementById('uploadCookiesBtn');
+const cookiesFileInput = document.getElementById('cookiesFile');
+const uploadStatusEl = document.getElementById('uploadStatus');
+const statusDot = document.getElementById('statusDot');
+const statusText = document.getElementById('statusText');
+
+// Open/close modal
+settingsBtn.addEventListener('click', () => {
+    cookiesModal.classList.remove('hidden');
+    checkCookiesStatus();
+});
+
+closeModal.addEventListener('click', () => {
+    cookiesModal.classList.add('hidden');
+});
+
+cookiesModal.addEventListener('click', (e) => {
+    if (e.target === cookiesModal) cookiesModal.classList.add('hidden');
+});
+
+// Check cookies status
+async function checkCookiesStatus() {
+    try {
+        const resp = await fetch('/api/cookies-status');
+        const data = await resp.json();
+        
+        if (data.has_cookies && data.youtube_cookies > 0) {
+            statusDot.classList.add('active');
+            statusText.textContent = `Active — ${data.youtube_cookies} YouTube cookies loaded`;
+        } else if (data.has_cookies) {
+            statusDot.classList.remove('active');
+            statusText.textContent = `File exists but no YouTube cookies found`;
+        } else {
+            statusDot.classList.remove('active');
+            statusText.textContent = 'Not configured — YouTube may block requests';
+        }
+    } catch (e) {
+        statusText.textContent = 'Could not check status';
+    }
+}
+
+// Upload cookies
+uploadCookiesBtn.addEventListener('click', () => {
+    cookiesFileInput.click();
+});
+
+cookiesFileInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    
+    uploadStatusEl.textContent = 'Uploading...';
+    uploadStatusEl.className = 'upload-status';
+    
+    const formData = new FormData();
+    formData.append('cookies', file);
+    
+    try {
+        const resp = await fetch('/api/upload-cookies', {
+            method: 'POST',
+            body: formData
+        });
+        
+        const data = await resp.json();
+        
+        if (data.success) {
+            uploadStatusEl.textContent = data.message;
+            uploadStatusEl.className = 'upload-status ' + (data.warning ? 'error' : 'success');
+            checkCookiesStatus();
+        } else {
+            uploadStatusEl.textContent = data.error || 'Upload failed';
+            uploadStatusEl.className = 'upload-status error';
+        }
+    } catch (err) {
+        uploadStatusEl.textContent = 'Upload failed — server error';
+        uploadStatusEl.className = 'upload-status error';
+    }
+    
+    // Reset file input
+    cookiesFileInput.value = '';
 });

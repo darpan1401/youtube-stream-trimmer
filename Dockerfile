@@ -11,9 +11,9 @@ WORKDIR /app
 
 # Copy requirements first for better caching
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir --upgrade yt-dlp
+RUN pip install --root-user-action=ignore --no-cache-dir --upgrade pip && \
+    pip install --root-user-action=ignore --no-cache-dir -r requirements.txt && \
+    pip install --root-user-action=ignore --no-cache-dir --upgrade yt-dlp
 
 # Copy app code
 COPY . .

@@ -4,7 +4,7 @@
 
 echo "=== Container starting ==="
 echo "Updating yt-dlp to latest version..."
-pip install --upgrade --no-cache-dir yt-dlp 2>&1 | tail -1
+pip install --root-user-action=ignore --upgrade --no-cache-dir yt-dlp 2>&1 | tail -1
 
 echo "yt-dlp version: $(yt-dlp --version 2>/dev/null || echo 'FAILED')"
 echo "ffmpeg: $(ffmpeg -version 2>/dev/null | head -1 || echo 'NOT FOUND')"
