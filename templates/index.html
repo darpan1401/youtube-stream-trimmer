@@ -2,181 +2,181 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="Lightning-fast YouTube video trimmer. Download, trim, and edit videos instantly.">
-    <title>YouTube Video Trimmer Pro</title>
-    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=6">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
+    <title>ClipForge — YouTube Trimmer</title>
+    <meta name="description" content="Trim YouTube videos, shorts & streams instantly. Fast, free, no watermark.">
+    <meta name="theme-color" content="#7c3aed">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=10">
 </head>
 <body>
-    <div class="background-animation"></div>
-    
-    <div class="container">
+    <!-- Background effects -->
+    <div class="bg-noise"></div>
+    <div class="bg-glow bg-glow--1"></div>
+    <div class="bg-glow bg-glow--2"></div>
+
+    <div id="app">
         <!-- Header -->
         <header class="header">
-            <div class="logo-section">
-                <div class="logo-icon"><i class="fas fa-film"></i></div>
-                <div>
-                    <h1>YouTube Trimmer Pro</h1>
-                    <p class="subtitle">Clean • Fast • Offline</p>
-                </div>
+            <div class="logo">
+                <svg class="logo-icon" viewBox="0 0 36 36" fill="none">
+                    <rect width="36" height="36" rx="10" fill="url(#logoGrad)"/>
+                    <path d="M14 11.5l9 5.5-9 5.5V11.5z" fill="#fff" fill-opacity=".95"/>
+                    <defs><linearGradient id="logoGrad" x1="0" y1="0" x2="36" y2="36"><stop stop-color="#a855f7"/><stop offset="1" stop-color="#7c3aed"/></linearGradient></defs>
+                </svg>
+                <span class="logo-text">Clip<span class="logo-accent">Forge</span></span>
             </div>
+            <span class="header-pill"><span class="pill-dot"></span>Online</span>
         </header>
 
-        <!-- Main Content -->
-        <main class="main-content">
-            <!-- Step 1: URL Input -->
-            <section class="card step-card">
-                <div class="step-header">
-                    <span class="step-number">01</span>
-                    <h2>Paste YouTube Link</h2>
-                </div>
-                
-                <div class="input-group">
-                    <input 
-                        type="text" 
-                        id="videoUrl" 
-                        class="url-input"
-                        placeholder="Enter YouTube video or live stream URL..."
-                    >
-                    <button class="btn btn-primary" id="loadBtn">
-                        <span class="btn-icon"><i class="fas fa-download"></i></span>
-                        <span>Load Video</span>
+        <!-- Hero -->
+        <section class="hero">
+            <h1 class="hero-title">Trim any YouTube content<br><span class="hero-gradient">in seconds</span></h1>
+            <p class="hero-sub">Videos · Shorts · Live Streams — just paste &amp; clip</p>
+
+            <div class="url-card">
+                <div class="url-row">
+                    <div class="url-icon-wrap">
+                        <svg viewBox="0 0 20 20" fill="currentColor" class="url-icon"><path d="M12.586 4.586a2 2 0 112.828 2.828l-3 3a2 2 0 01-2.828 0 1 1 0 00-1.414 1.414 4 4 0 005.656 0l3-3a4 4 0 00-5.656-5.656l-1.5 1.5a1 1 0 101.414 1.414l1.5-1.5zm-5 5a2 2 0 012.828 0 1 1 0 001.414-1.414 4 4 0 00-5.656 0l-3 3a4 4 0 105.656 5.656l1.5-1.5a1 1 0 10-1.414-1.414l-1.5 1.5a2 2 0 11-2.828-2.828l3-3z"/></svg>
+                    </div>
+                    <input type="text" id="urlInput" class="url-input" placeholder="Paste YouTube URL here…" autocomplete="off" spellcheck="false" enterkeyhint="go">
+                    <button id="loadBtn" class="btn-load">
+                        <span class="btn-load-text">Load</span>
+                        <svg class="btn-load-spinner hidden" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" fill="none" stroke-dasharray="31.4 31.4" stroke-linecap="round"/></svg>
                     </button>
                 </div>
-                
-                <div id="loadingSpinner" class="loading hidden">
-                    <div class="spinner"></div>
-                    <p>Fetching video information...</p>
-                </div>
-            </section>
+                <p id="urlError" class="url-error hidden"></p>
+            </div>
+        </section>
 
-            <!-- Step 2: Video Info & Trimming -->
-            <section id="videoSection" class="card step-card hidden">
-                <div class="step-header">
-                    <span class="step-number">02</span>
-                    <h2>Trim Your Video</h2>
+        <!-- Loading Skeleton -->
+        <section id="skeleton" class="section-skeleton hidden">
+            <div class="skel-card">
+                <div class="skel skel-thumb"></div>
+                <div class="skel-info">
+                    <div class="skel skel-line skel-w80"></div>
+                    <div class="skel skel-line skel-w50"></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Editor -->
+        <section id="editor" class="editor hidden">
+            <!-- Video Info Card -->
+            <div class="vid-card">
+                <div class="vid-thumb-wrap">
+                    <img id="vThumb" class="vid-thumb" alt="thumbnail" loading="lazy">
+                    <span id="vBadge" class="vid-badge">00:00</span>
+                </div>
+                <div class="vid-info">
+                    <h2 id="vTitle" class="vid-title"></h2>
+                    <p id="vChannel" class="vid-channel"></p>
+                </div>
+            </div>
+
+            <!-- Trim Controls -->
+            <div class="card trim-card">
+                <div class="card-head">
+                    <h3>
+                        <svg viewBox="0 0 20 20" fill="currentColor" class="card-icon"><path fill-rule="evenodd" d="M5.5 2a3.5 3.5 0 101.665 6.58L8.585 10l-1.42 1.42a3.5 3.5 0 101.414 1.414L10 11.414l1.42 1.42a3.5 3.5 0 101.414-1.414L11.414 10l1.42-1.42A3.5 3.5 0 1011.42 7.166L10 8.586 8.58 7.165A3.5 3.5 0 005.5 2zM4 5.5a1.5 1.5 0 113 0 1.5 1.5 0 01-3 0zm0 9a1.5 1.5 0 113 0 1.5 1.5 0 01-3 0zm9-9a1.5 1.5 0 113 0 1.5 1.5 0 01-3 0zm0 9a1.5 1.5 0 113 0 1.5 1.5 0 01-3 0z" clip-rule="evenodd"/></svg>
+                        Trim Range
+                    </h3>
+                    <span id="trimDur" class="chip">0s</span>
                 </div>
 
-                <!-- Video Info -->
-                <div class="video-info">
-                    <div class="thumbnail-wrapper">
-                        <img id="videoThumbnail" class="thumbnail" src="" alt="Video thumbnail">
-                        <div class="duration-badge" id="durationBadge">00:00</div>
-                    </div>
-                    
-                    <div class="video-details">
-                        <h3 id="videoTitle">Video Title</h3>
-                        <p id="videoUploader" class="uploader">Uploader</p>
-                        <div class="duration-info">
-                            <span class="duration-label">Total Duration:</span>
-                            <span id="totalDuration" class="duration-value">00:00:00</span>
+                <!-- Range Slider -->
+                <div class="slider-wrap">
+                    <div class="slider-track" id="sliderTrack">
+                        <div class="slider-fill" id="sliderFill"></div>
+                        <div class="slider-handle" id="hStart" tabindex="0" role="slider" aria-label="Start time">
+                            <span class="handle-tip" id="tipStart">00:00:00</span>
+                        </div>
+                        <div class="slider-handle" id="hEnd" tabindex="0" role="slider" aria-label="End time">
+                            <span class="handle-tip" id="tipEnd">00:00:00</span>
                         </div>
                     </div>
-                </div>
-
-                <!-- Quality Selection -->
-                <div class="settings-group">
-                    <label for="qualitySelect">Video Quality</label>
-                    <div class="quality-grid">
-                        <button class="quality-btn active" data-quality="best">
-                            <span class="quality-icon"><i class="fas fa-star"></i></span>
-                            <span>Best</span>
-                        </button>
-                        <button class="quality-btn" data-quality="1080">
-                            <span class="quality-icon"><i class="fas fa-video"></i></span>
-                            <span>1080p</span>
-                        </button>
-                        <button class="quality-btn" data-quality="720">
-                            <span class="quality-icon"><i class="fas fa-tv"></i></span>
-                            <span>720p</span>
-                        </button>
-                        <button class="quality-btn" data-quality="480">
-                            <span class="quality-icon"><i class="fas fa-mobile-alt"></i></span>
-                            <span>480p</span>
-                        </button>
-                        <button class="quality-btn" data-quality="audio">
-                            <span class="quality-icon"><i class="fas fa-music"></i></span>
-                            <span>Audio Only</span>
-                        </button>
-                    </div>
-                    <input type="hidden" id="selectedQuality" value="best">
-                </div>
-
-                <!-- Timeline Slider -->
-                <div class="timeline-section">
-                    <h4>Select Trim Range</h4>
-                    <div class="timeline-wrapper">
-                        <div class="time-display">
-                            <div class="time-box">
-                                <label>Start</label>
-                                <span id="startTimeDisplay" class="time-value">00:00:00</span>
-                            </div>
-                            <div class=\"time-divider\"><i class=\"fas fa-arrow-right\"></i></div>
-                            <div class="time-box">
-                                <label>End</label>
-                                <span id="endTimeDisplay" class="time-value">00:00:00</span>
-                            </div>
-                            <div class="time-box highlight">
-                                <label>Duration</label>
-                                <span id="trimDurationDisplay" class="time-value">00:00:00</span>
-                            </div>
-                        </div>
-                        
-                        <div class="range-slider-wrapper" id="rangeSlider">
-                            <div class="slider-track"></div>
-                            <div class="slider-highlight" id="sliderHighlight"></div>
-                            <div class="slider-handle handle-start" id="handleStart" tabindex="0">
-                                <div class="handle-tooltip" id="tooltipStart">00:00:00</div>
-                            </div>
-                            <div class="slider-handle handle-end" id="handleEnd" tabindex="0">
-                                <div class="handle-tooltip" id="tooltipEnd">00:00:00</div>
-                            </div>
-                        </div>
-
-                        <div class="precise-input">
-                            <div class="input-field">
-                                <label>Start (sec)</label>
-                                <input type="number" id="startSecInput" class="time-precise-input" min="0" value="0">
-                            </div>
-                            <div class="input-field">
-                                <label>End (sec)</label>
-                                <input type="number" id="endSecInput" class="time-precise-input" min="0" value="0">
-                            </div>
-                        </div>
+                    <div class="slider-labels">
+                        <span>0:00</span>
+                        <span id="sliderMax">0:00</span>
                     </div>
                 </div>
 
-                <!-- Output Filename -->
-                <div class="settings-group">
-                    <label for="outputName">Output Filename</label>
-                    <div class="input-group">
-                        <input 
-                            type="text" 
-                            id="outputName"
-                            class="url-input"
-                            placeholder="e.g., my_video_trim"
-                            value="youtube_trim"
-                        >
-                        <span class="input-suffix">.mp4</span>
+                <!-- Time Inputs -->
+                <div class="time-row">
+                    <div class="time-group">
+                        <label>Start</label>
+                        <input type="text" id="tStart" class="time-input" value="00:00:00" inputmode="numeric">
+                    </div>
+                    <span class="time-sep">→</span>
+                    <div class="time-group">
+                        <label>End</label>
+                        <input type="text" id="tEnd" class="time-input" value="00:00:00" inputmode="numeric">
                     </div>
                 </div>
+            </div>
 
-                <!-- Download Button -->
-                <button class="btn btn-success" id="downloadBtn">
-                    <span class="btn-icon"><i class="fas fa-arrow-down"></i></span>
-                    <span>Trim & Download</span>
-                </button>
-            </section>
-        </main>
+            <!-- Output Options -->
+            <div class="card options-card">
+                <div class="card-head">
+                    <h3>
+                        <svg viewBox="0 0 20 20" fill="currentColor" class="card-icon"><path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.062 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"/></svg>
+                        Output
+                    </h3>
+                </div>
+                <div class="quality-row" id="qualityRow">
+                    <button class="q-chip active" data-q="best">✦ Best</button>
+                    <button class="q-chip" data-q="1080">1080p</button>
+                    <button class="q-chip" data-q="720">720p</button>
+                    <button class="q-chip" data-q="480">480p</button>
+                    <button class="q-chip" data-q="audio">♫ MP3</button>
+                </div>
+                <div class="fname-row">
+                    <label for="fnameInput">Filename</label>
+                    <input type="text" id="fnameInput" class="fname-input" value="youtube_trim" maxlength="80" spellcheck="false">
+                </div>
+            </div>
+
+            <!-- CTA -->
+            <button id="trimBtn" class="btn-trim">
+                <svg viewBox="0 0 20 20" fill="currentColor" class="trim-icon"><path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>
+                <span>Trim &amp; Download</span>
+            </button>
+        </section>
+
+        <!-- Progress Overlay -->
+        <div id="overlay" class="overlay hidden">
+            <div class="overlay-card">
+                <!-- Ring -->
+                <div class="ring-wrap">
+                    <svg class="ring-svg" viewBox="0 0 120 120">
+                        <circle class="ring-bg" cx="60" cy="60" r="52"/>
+                        <circle class="ring-fg" id="ringFg" cx="60" cy="60" r="52"/>
+                    </svg>
+                    <span class="ring-pct" id="ringPct">0%</span>
+                </div>
+                <p class="overlay-phase" id="oPhase">Starting…</p>
+                <div class="overlay-stats">
+                    <div class="o-stat"><span class="o-label">Speed</span><span class="o-val" id="oSpeed">—</span></div>
+                    <div class="o-stat"><span class="o-label">ETA</span><span class="o-val" id="oEta">—</span></div>
+                    <div class="o-stat"><span class="o-label">Size</span><span class="o-val" id="oSize">—</span></div>
+                </div>
+                <div class="overlay-bar-wrap">
+                    <div class="overlay-bar" id="oBar"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Toast container -->
+        <div id="toasts" class="toast-wrap"></div>
 
         <!-- Footer -->
         <footer class="footer">
-            <p>Crafted with <i class="fas fa-heart" style="color: #ff416c;"></i> by Darpan | © 2026 YouTube Trimmer Pro</p>
+            <p>Powered by <strong>yt-dlp</strong> &amp; <strong>ffmpeg</strong></p>
         </footer>
     </div>
 
-    <script src="{{ url_for('static', filename='script.js') }}?v=8"></script>
+    <script src="{{ url_for('static', filename='script.js') }}?v=10"></script>
 </body>
 </html>

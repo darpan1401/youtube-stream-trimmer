@@ -1,598 +1,435 @@
-// ==================== ALERT NOTIFICATION SYSTEM ====================
-function showAlert(message, type = 'info', duration = 4000) {
-    // Remove existing alert if any (except loading ones when showing non-loading)
-    const existing = document.querySelectorAll('.custom-alert-overlay');
-    existing.forEach(el => {
-        if (!el.classList.contains('alert-loading') || type !== 'loading') {
-            el.classList.add('alert-exit');
-            setTimeout(() => el.remove(), 300);
-        }
-    });
+/* ClipForge — Production Frontend JS */
+'use strict';
 
-    const icons = {
-        success: 'fa-check-circle',
-        error: 'fa-times-circle',
-        warning: 'fa-exclamation-triangle',
-        info: 'fa-info-circle',
-        loading: 'fa-spinner fa-spin'
-    };
+// ===== UTILITIES =====
+const $ = s => document.querySelector(s);
+const $$ = s => document.querySelectorAll(s);
 
-    const titles = {
-        success: 'Success!',
-        error: 'Error!',
-        warning: 'Warning!',
-        info: 'Info',
-        loading: 'Processing...'
-    };
+function hms(sec) {
+    sec = Math.max(0, Math.floor(sec));
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = sec % 60;
+    return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+}
 
-    const overlay = document.createElement('div');
-    overlay.className = `custom-alert-overlay alert-${type} ${type === 'loading' ? 'alert-loading' : ''}`;
+function shortTime(sec) {
+    sec = Math.max(0, Math.floor(sec));
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    if (sec >= 3600) {
+        const h = Math.floor(sec / 3600);
+        return `${h}:${String(m % 60).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+    }
+    return `${m}:${String(s).padStart(2,'0')}`;
+}
 
-    overlay.innerHTML = `
-        <div class="custom-alert">
-            <div class="alert-icon alert-icon-${type}"><i class="fas ${icons[type] || icons.info}"></i></div>
-            <h3 class="alert-title">${titles[type] || titles.info}</h3>
-            <p class="alert-message">${message}</p>
-            <div class="alert-details" id="alertDetails"></div>
-            ${type === 'loading' ? `
-                <div class="alert-progress-wrapper">
-                    <div class="alert-progress-bar">
-                        <div class="alert-progress-fill"></div>
-                    </div>
-                    <span class="alert-progress-percent">0%</span>
-                </div>
-            ` : ''}
-            ${type !== 'loading' ? '<button class="alert-ok-btn" onclick="this.closest(\'.custom-alert-overlay\').classList.add(\'alert-exit\');setTimeout(()=>this.closest(\'.custom-alert-overlay\').remove(),300)">OK</button>' : ''}
+function parseHMS(str) {
+    const parts = str.replace(/[^0-9:]/g, '').split(':').map(Number);
+    if (parts.length === 3) return (parts[0] * 3600) + (parts[1] * 60) + parts[2];
+    if (parts.length === 2) return (parts[0] * 60) + parts[1];
+    return parts[0] || 0;
+}
+
+function fmtBytes(b) {
+    if (b === 0) return '0 B';
+    const k = 1024, u = ['B','KB','MB','GB'];
+    const i = Math.floor(Math.log(b) / Math.log(k));
+    return (b / Math.pow(k, i)).toFixed(1) + ' ' + u[i];
+}
+
+// ===== TOAST SYSTEM =====
+function toast(title, msg, type = 'success', dur = 4500) {
+    const wrap = $('#toasts');
+    const icons = { success: '✓', error: '✕', warning: '!' };
+    const cls = { success: 's', error: 'e', warning: 'w' };
+    const el = document.createElement('div');
+    el.className = 'toast';
+    el.innerHTML = `
+        <div class="toast-icon ${cls[type] || 's'}">${icons[type] || '✓'}</div>
+        <div class="toast-body">
+            <div class="toast-title">${title}</div>
+            ${msg ? `<div class="toast-msg">${msg}</div>` : ''}
         </div>
+        <button class="toast-close" aria-label="Close">×</button>
     `;
+    el.querySelector('.toast-close').onclick = () => dismiss(el);
+    wrap.appendChild(el);
 
-    document.body.appendChild(overlay);
-    requestAnimationFrame(() => overlay.classList.add('alert-enter'));
-
-    // Auto-remove for non-loading alerts
-    if (type !== 'loading' && duration > 0) {
-        setTimeout(() => {
-            overlay.classList.add('alert-exit');
-            setTimeout(() => overlay.remove(), 300);
-        }, duration);
-    }
-
-    return overlay;
-}
-
-function removeAlert(overlay) {
-    if (overlay && overlay.parentElement) {
-        overlay.classList.add('alert-exit');
-        setTimeout(() => overlay.remove(), 300);
+    const timer = setTimeout(() => dismiss(el), dur);
+    function dismiss(t) {
+        clearTimeout(timer);
+        t.classList.add('exit');
+        setTimeout(() => t.remove(), 260);
     }
 }
 
-function updateAlertMessage(overlay, message) {
-    if (overlay) {
-        const msgEl = overlay.querySelector('.alert-message');
-        if (msgEl) msgEl.innerHTML = message;
-    }
-}
-
-function updateAlertDetails(overlay, html) {
-    if (overlay) {
-        const detailsEl = overlay.querySelector('.alert-details');
-        if (detailsEl) detailsEl.innerHTML = html;
-    }
-}
-
-function updateAlertProgress(overlay, percent) {
-    if (overlay) {
-        const fill = overlay.querySelector('.alert-progress-fill');
-        if (fill) fill.style.width = percent + '%';
-    }
-}
-
-function updateAlertPercentText(overlay, percent) {
-    if (overlay) {
-        const pctEl = overlay.querySelector('.alert-progress-percent');
-        if (pctEl) pctEl.textContent = percent + '%';
-    }
-}
-
-// ==================== STATE MANAGEMENT ====================
-let videoState = {
+// ===== STATE =====
+const state = {
     url: '',
     duration: 0,
     title: '',
-    uploader: '',
-    thumbnail: '',
-    startTime: 0,
-    endTime: 0,
-    quality: 'best'
+    channel: '',
+    thumb: '',
+    start: 0,
+    end: 0,
+    quality: 'best',
+    busy: false
 };
 
-// ==================== DOM ELEMENTS ====================
-const videoUrlInput = document.getElementById('videoUrl');
-const loadBtn = document.getElementById('loadBtn');
-const loadingSpinner = document.getElementById('loadingSpinner');
-const videoSection = document.getElementById('videoSection');
+// ===== DOM =====
+const urlInput = $('#urlInput');
+const loadBtn = $('#loadBtn');
+const urlError = $('#urlError');
+const skeleton = $('#skeleton');
+const editor = $('#editor');
+const trimBtn = $('#trimBtn');
 
-const videoThumbnail = document.getElementById('videoThumbnail');
-const videoTitle = document.getElementById('videoTitle');
-const videoUploader = document.getElementById('videoUploader');
-const totalDurationEl = document.getElementById('totalDuration');
-const durationBadge = document.getElementById('durationBadge');
+// Video info
+const vThumb = $('#vThumb');
+const vBadge = $('#vBadge');
+const vTitle = $('#vTitle');
+const vChannel = $('#vChannel');
 
-const startTimeDisplay = document.getElementById('startTimeDisplay');
-const endTimeDisplay = document.getElementById('endTimeDisplay');
-const trimDurationDisplay = document.getElementById('trimDurationDisplay');
-const startSecInput = document.getElementById('startSecInput');
-const endSecInput = document.getElementById('endSecInput');
+// Slider
+const sliderTrack = $('#sliderTrack');
+const sliderFill = $('#sliderFill');
+const hStart = $('#hStart');
+const hEnd = $('#hEnd');
+const tipStart = $('#tipStart');
+const tipEnd = $('#tipEnd');
+const sliderMax = $('#sliderMax');
+const trimDur = $('#trimDur');
 
-// Custom slider elements
-const rangeSlider = document.getElementById('rangeSlider');
-const handleStart = document.getElementById('handleStart');
-const handleEnd = document.getElementById('handleEnd');
-const sliderHighlight = document.getElementById('sliderHighlight');
-const tooltipStart = document.getElementById('tooltipStart');
-const tooltipEnd = document.getElementById('tooltipEnd');
+// Time inputs
+const tStart = $('#tStart');
+const tEnd = $('#tEnd');
 
-const qualityBtns = document.querySelectorAll('.quality-btn');
-const selectedQualityInput = document.getElementById('selectedQuality');
-const outputName = document.getElementById('outputName');
-const downloadBtn = document.getElementById('downloadBtn');
+// Quality
+const qualityRow = $('#qualityRow');
+const fnameInput = $('#fnameInput');
 
-// ==================== UTILITY FUNCTIONS ====================
-function secondsToHMS(seconds) {
-    seconds = Math.floor(seconds);
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const secs = seconds % 60;
-    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
-}
+// Progress overlay
+const overlay = $('#overlay');
+const ringFg = $('#ringFg');
+const ringPct = $('#ringPct');
+const oPhase = $('#oPhase');
+const oSpeed = $('#oSpeed');
+const oEta = $('#oEta');
+const oSize = $('#oSize');
+const oBar = $('#oBar');
 
-function showError(message) {
-    showAlert(message, 'error', 5000);
-}
+// Ring circumference (r=52)
+const CIRC = 2 * Math.PI * 52; // ~326.73
 
-function showSuccess(message) {
-    showAlert(message, 'success', 4000);
-}
+// ===== LOAD VIDEO =====
+loadBtn.addEventListener('click', loadVideo);
+urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') loadVideo(); });
 
-function disableLoadBtn(disable) {
-    loadBtn.disabled = disable;
-    loadBtn.style.opacity = disable ? '0.6' : '1';
-}
+async function loadVideo() {
+    const url = urlInput.value.trim();
+    if (!url) { showUrlError('Please paste a YouTube URL'); return; }
+    if (state.busy) return;
 
-// ==================== LOAD VIDEO ====================
-loadBtn.addEventListener('click', async () => {
-    const url = videoUrlInput.value.trim();
-    
-    if (!url) {
-        showError('Please paste a YouTube URL');
-        return;
-    }
-
-    disableLoadBtn(true);
-    loadingSpinner.classList.remove('hidden');
+    state.busy = true;
+    setLoading(true);
+    hideUrlError();
+    editor.classList.add('hidden');
+    skeleton.classList.remove('hidden');
 
     try {
-        const response = await fetch('/api/get-video-info', {
+        const res = await fetch('/api/get-video-info', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url })
         });
+        const data = await res.json();
 
-        if (!response.ok) {
-            const data = await response.json();
+        if (!res.ok || !data.success) {
             throw new Error(data.error || 'Failed to load video');
         }
 
-        const data = await response.json();
-        
-        // Update state
-        videoState.url = url;
-        videoState.duration = data.duration;
-        videoState.title = data.title;
-        videoState.uploader = data.uploader;
-        videoState.thumbnail = data.thumbnail;
-        videoState.startTime = 0;
-        videoState.endTime = data.duration;
+        state.url = url;
+        state.duration = data.duration;
+        state.title = data.title || 'Untitled';
+        state.channel = data.uploader || 'Unknown';
+        state.thumb = data.thumbnail || '';
+        state.start = 0;
+        state.end = data.duration;
 
-        // Update UI
-        videoThumbnail.src = data.thumbnail;
-        videoTitle.textContent = data.title;
-        videoUploader.textContent = `By ${data.uploader}`;
-        totalDurationEl.textContent = secondsToHMS(data.duration);
-        durationBadge.textContent = secondsToHMS(data.duration);
+        // Populate UI
+        vThumb.src = state.thumb;
+        vBadge.textContent = shortTime(state.duration);
+        vTitle.textContent = state.title;
+        vChannel.textContent = state.channel;
+        sliderMax.textContent = shortTime(state.duration);
+        fnameInput.value = state.title.substring(0, 60).replace(/[^a-zA-Z0-9_ -]/g, '_') || 'youtube_trim';
 
-        // Reset slider
-        startSecInput.max = data.duration;
-        endSecInput.max = data.duration;
-        startSecInput.value = 0;
-        endSecInput.value = data.duration;
+        updateSlider();
+        updateTimeDisplays();
 
-        updateSliderUI();
-        updateTimeDisplayFromState();
-        
-        videoSection.classList.remove('hidden');
-        loadingSpinner.classList.add('hidden');
-        showAlert('Video loaded successfully!', 'success', 3000);
+        skeleton.classList.add('hidden');
+        editor.classList.remove('hidden');
+        toast('Video loaded', state.title, 'success', 3000);
 
-    } catch (error) {
-        showError(error.message || 'Error loading video');
-        loadingSpinner.classList.add('hidden');
+    } catch (err) {
+        skeleton.classList.add('hidden');
+        showUrlError(err.message);
+        toast('Error', err.message, 'error', 5000);
     } finally {
-        disableLoadBtn(false);
+        state.busy = false;
+        setLoading(false);
     }
-});
-
-// ==================== CUSTOM SLIDER HANDLING ====================
-
-// Update handle positions and highlight bar from state
-function updateSliderUI() {
-    const duration = videoState.duration;
-    if (duration <= 0) return;
-    
-    const startPct = (videoState.startTime / duration) * 100;
-    const endPct = (videoState.endTime / duration) * 100;
-    
-    // Position handles using percentage of the track area
-    handleStart.style.left = startPct + '%';
-    handleEnd.style.left = endPct + '%';
-    
-    // Highlight bar between the two handles
-    sliderHighlight.style.left = startPct + '%';
-    sliderHighlight.style.width = (endPct - startPct) + '%';
-    
-    // Update tooltips
-    tooltipStart.textContent = secondsToHMS(videoState.startTime);
-    tooltipEnd.textContent = secondsToHMS(videoState.endTime);
 }
 
-// Update all time displays from videoState
-function updateTimeDisplayFromState() {
-    startTimeDisplay.textContent = secondsToHMS(videoState.startTime);
-    endTimeDisplay.textContent = secondsToHMS(videoState.endTime);
-    trimDurationDisplay.textContent = secondsToHMS(videoState.endTime - videoState.startTime);
-    startSecInput.value = videoState.startTime;
-    endSecInput.value = videoState.endTime;
+function setLoading(on) {
+    loadBtn.disabled = on;
+    loadBtn.querySelector('.btn-load-text').classList.toggle('hidden', on);
+    loadBtn.querySelector('.btn-load-spinner').classList.toggle('hidden', !on);
 }
 
-// Convert mouse/touch X position to seconds
-function xToSeconds(clientX) {
-    const rect = rangeSlider.getBoundingClientRect();
+function showUrlError(msg) {
+    urlError.textContent = msg;
+    urlError.classList.remove('hidden');
+}
+function hideUrlError() {
+    urlError.classList.add('hidden');
+}
+
+// ===== SLIDER =====
+let dragging = null;
+
+function updateSlider() {
+    if (state.duration <= 0) return;
+    const sp = (state.start / state.duration) * 100;
+    const ep = (state.end / state.duration) * 100;
+    hStart.style.left = sp + '%';
+    hEnd.style.left = ep + '%';
+    sliderFill.style.left = sp + '%';
+    sliderFill.style.width = (ep - sp) + '%';
+    tipStart.textContent = hms(state.start);
+    tipEnd.textContent = hms(state.end);
+}
+
+function updateTimeDisplays() {
+    tStart.value = hms(state.start);
+    tEnd.value = hms(state.end);
+    const dur = state.end - state.start;
+    if (dur >= 3600) trimDur.textContent = hms(dur);
+    else if (dur >= 60) trimDur.textContent = Math.floor(dur / 60) + 'm ' + (dur % 60) + 's';
+    else trimDur.textContent = dur + 's';
+}
+
+function posToSec(clientX) {
+    const rect = sliderTrack.getBoundingClientRect();
     let pct = (clientX - rect.left) / rect.width;
     pct = Math.max(0, Math.min(1, pct));
-    return Math.round(pct * videoState.duration);
+    return Math.round(pct * state.duration);
 }
 
-// Drag state
-let activeHandle = null;
+// Mouse
+hStart.addEventListener('mousedown', e => startDrag(e, 'start'));
+hEnd.addEventListener('mousedown', e => startDrag(e, 'end'));
+document.addEventListener('mousemove', onDrag);
+document.addEventListener('mouseup', stopDrag);
 
-function onDragStart(e, handle) {
+// Touch
+hStart.addEventListener('touchstart', e => startDrag(e, 'start'), { passive: false });
+hEnd.addEventListener('touchstart', e => startDrag(e, 'end'), { passive: false });
+document.addEventListener('touchmove', onDrag, { passive: false });
+document.addEventListener('touchend', stopDrag);
+
+function startDrag(e, which) {
     e.preventDefault();
-    activeHandle = handle;
+    dragging = which;
+    const handle = which === 'start' ? hStart : hEnd;
     handle.classList.add('dragging');
-    document.body.style.cursor = 'grabbing';
-    document.body.style.userSelect = 'none';
 }
 
-function onDragMove(e) {
-    if (!activeHandle) return;
-    
-    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-    let sec = xToSeconds(clientX);
-    
-    if (activeHandle === handleStart) {
-        sec = Math.max(0, Math.min(sec, videoState.endTime - 1));
-        videoState.startTime = sec;
-    } else {
-        sec = Math.max(videoState.startTime + 1, Math.min(sec, videoState.duration));
-        videoState.endTime = sec;
-    }
-    
-    updateSliderUI();
-    updateTimeDisplayFromState();
-}
-
-function onDragEnd() {
-    if (!activeHandle) return;
-    activeHandle.classList.remove('dragging');
-    activeHandle = null;
-    document.body.style.cursor = '';
-    document.body.style.userSelect = '';
-}
-
-// Mouse events on handles
-handleStart.addEventListener('mousedown', (e) => onDragStart(e, handleStart));
-handleEnd.addEventListener('mousedown', (e) => onDragStart(e, handleEnd));
-document.addEventListener('mousemove', onDragMove);
-document.addEventListener('mouseup', onDragEnd);
-
-// Touch events on handles
-handleStart.addEventListener('touchstart', (e) => onDragStart(e, handleStart), { passive: false });
-handleEnd.addEventListener('touchstart', (e) => onDragStart(e, handleEnd), { passive: false });
-document.addEventListener('touchmove', onDragMove, { passive: false });
-document.addEventListener('touchend', onDragEnd);
-
-// Click on track to move nearest handle
-rangeSlider.addEventListener('click', (e) => {
-    if (e.target.closest('.slider-handle')) return; // ignore handle clicks
-    
-    const sec = xToSeconds(e.clientX);
-    const distToStart = Math.abs(sec - videoState.startTime);
-    const distToEnd = Math.abs(sec - videoState.endTime);
-    
-    if (distToStart <= distToEnd) {
-        videoState.startTime = Math.max(0, Math.min(sec, videoState.endTime - 1));
-    } else {
-        videoState.endTime = Math.max(videoState.startTime + 1, Math.min(sec, videoState.duration));
-    }
-    
-    updateSliderUI();
-    updateTimeDisplayFromState();
-});
-
-// Keyboard support on handles (arrow keys)
-handleStart.addEventListener('keydown', (e) => {
-    if (e.key === 'ArrowRight' || e.key === 'ArrowUp') {
-        videoState.startTime = Math.min(videoState.startTime + 1, videoState.endTime - 1);
-    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') {
-        videoState.startTime = Math.max(0, videoState.startTime - 1);
-    } else return;
+function onDrag(e) {
+    if (!dragging) return;
     e.preventDefault();
-    updateSliderUI();
-    updateTimeDisplayFromState();
-});
+    const x = e.touches ? e.touches[0].clientX : e.clientX;
+    let sec = posToSec(x);
 
-handleEnd.addEventListener('keydown', (e) => {
-    if (e.key === 'ArrowRight' || e.key === 'ArrowUp') {
-        videoState.endTime = Math.min(videoState.endTime + 1, videoState.duration);
-    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') {
-        videoState.endTime = Math.max(videoState.startTime + 1, videoState.endTime - 1);
+    if (dragging === 'start') {
+        sec = Math.max(0, Math.min(sec, state.end - 1));
+        state.start = sec;
+    } else {
+        sec = Math.max(state.start + 1, Math.min(sec, state.duration));
+        state.end = sec;
+    }
+    updateSlider();
+    updateTimeDisplays();
+}
+
+function stopDrag() {
+    if (!dragging) return;
+    const handle = dragging === 'start' ? hStart : hEnd;
+    handle.classList.remove('dragging');
+    dragging = null;
+}
+
+// Keyboard
+hStart.addEventListener('keydown', e => handleKey(e, 'start'));
+hEnd.addEventListener('keydown', e => handleKey(e, 'end'));
+
+function handleKey(e, which) {
+    const step = e.shiftKey ? 10 : 1;
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        if (which === 'start') state.start = Math.max(0, state.start - step);
+        else state.end = Math.max(state.start + 1, state.end - step);
+    } else if (e.key === 'ArrowRight' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (which === 'start') state.start = Math.min(state.end - 1, state.start + step);
+        else state.end = Math.min(state.duration, state.end + step);
     } else return;
-    e.preventDefault();
-    updateSliderUI();
-    updateTimeDisplayFromState();
-});
-
-// Precise input handling
-startSecInput.addEventListener('input', function() {
-    handleStartInput();
-});
-
-startSecInput.addEventListener('change', function() {
-    handleStartInput();
-});
-
-endSecInput.addEventListener('input', function() {
-    handleEndInput();
-});
-
-endSecInput.addEventListener('change', function() {
-    handleEndInput();
-});
-
-function handleStartInput() {
-    let value = parseInt(startSecInput.value);
-    if (isNaN(value) || startSecInput.value === '') {
-        return;
-    }
-    
-    value = Math.max(0, Math.min(value, videoState.duration - 1));
-    
-    if (value >= videoState.endTime) {
-        value = Math.max(0, videoState.endTime - 1);
-    }
-    
-    videoState.startTime = value;
-    startSecInput.value = value;
-    
-    startTimeDisplay.textContent = secondsToHMS(value);
-    trimDurationDisplay.textContent = secondsToHMS(videoState.endTime - value);
-    updateSliderUI();
+    updateSlider();
+    updateTimeDisplays();
 }
 
-function handleEndInput() {
-    let value = parseInt(endSecInput.value);
-    if (isNaN(value) || endSecInput.value === '') {
-        return;
-    }
-    
-    value = Math.max(1, Math.min(value, videoState.duration));
-    
-    if (value <= videoState.startTime) {
-        value = Math.min(videoState.duration, videoState.startTime + 1);
-    }
-    
-    videoState.endTime = value;
-    endSecInput.value = value;
-    
-    endTimeDisplay.textContent = secondsToHMS(value);
-    trimDurationDisplay.textContent = secondsToHMS(value - videoState.startTime);
-    updateSliderUI();
-}
-
-// Re-position handles on window resize
-window.addEventListener('resize', () => {
-    if (videoState.duration > 0) updateSliderUI();
+// Time Inputs
+tStart.addEventListener('change', () => {
+    let s = parseHMS(tStart.value);
+    s = Math.max(0, Math.min(s, state.end - 1));
+    state.start = s;
+    updateSlider();
+    updateTimeDisplays();
+});
+tEnd.addEventListener('change', () => {
+    let s = parseHMS(tEnd.value);
+    s = Math.max(state.start + 1, Math.min(s, state.duration));
+    state.end = s;
+    updateSlider();
+    updateTimeDisplays();
 });
 
-// ==================== QUALITY SELECTION ====================
-qualityBtns.forEach(btn => {
-    btn.addEventListener('click', () => {
-        qualityBtns.forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        videoState.quality = btn.dataset.quality;
-        selectedQualityInput.value = videoState.quality;
-    });
+// ===== QUALITY =====
+qualityRow.addEventListener('click', e => {
+    const btn = e.target.closest('.q-chip');
+    if (!btn) return;
+    qualityRow.querySelectorAll('.q-chip').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    state.quality = btn.dataset.q;
 });
 
-// ==================== DOWNLOAD VIDEO ====================
-let isDownloading = false;
+// ===== TRIM & DOWNLOAD =====
+trimBtn.addEventListener('click', startTrim);
 
-downloadBtn.addEventListener('click', async () => {
-    if (isDownloading) return;
-    
-    const trimDuration = videoState.endTime - videoState.startTime;
-    
-    if (trimDuration <= 0) {
-        showAlert('End time must be greater than start time', 'warning', 4000);
-        return;
-    }
+async function startTrim() {
+    if (state.busy || !state.url) return;
+    const dur = state.end - state.start;
+    if (dur <= 0) { toast('Invalid range', 'End time must be after start time', 'warning'); return; }
 
-    const filename = outputName.value.trim() || 'youtube_trim';
-    
-    const isAudio = videoState.quality === 'audio';
-    const fileExt = isAudio ? '.mp3' : '.mp4';
-    
-    isDownloading = true;
-    downloadBtn.disabled = true;
-    downloadBtn.style.opacity = '0.5';
-    downloadBtn.style.pointerEvents = 'none';
-    downloadBtn.querySelector('span:last-child').textContent = 'Processing...';
-    
-    const qualityLabel = isAudio ? 'Audio Only' : (videoState.quality === 'best' ? 'Best Quality' : videoState.quality + 'p');
-    const loadingAlert = showAlert(`Processing ${qualityLabel}...<br><span style="font-size:0.85rem;color:var(--text-secondary)">Trim: ${secondsToHMS(videoState.startTime)} → ${secondsToHMS(videoState.endTime)}</span>`, 'loading', 0);
+    state.busy = true;
+    trimBtn.disabled = true;
+    showOverlay(true);
 
+    const fname = fnameInput.value.trim() || 'youtube_trim';
+    const isAudio = state.quality === 'audio';
+    const ext = isAudio ? '.mp3' : '.mp4';
     let taskId = null;
 
     try {
-        // Step 1: Start the trim task
-        const startResponse = await fetch('/api/start-trim', {
+        // 1. Start trim
+        const res = await fetch('/api/start-trim', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                url: videoState.url,
-                startTime: videoState.startTime,
-                endTime: videoState.endTime,
-                quality: videoState.quality,
-                filename: filename
+                url: state.url,
+                startTime: state.start,
+                endTime: state.end,
+                quality: state.quality,
+                filename: fname
             })
         });
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Failed to start');
+        taskId = d.task_id;
 
-        if (!startResponse.ok) {
-            const data = await startResponse.json();
-            throw new Error(data.error || 'Failed to start processing');
-        }
-
-        const startData = await startResponse.json();
-        taskId = startData.task_id;
-
-        // Step 2: Listen to SSE progress
+        // 2. SSE progress
         await new Promise((resolve, reject) => {
-            const evtSource = new EventSource(`/api/progress/${taskId}`);
-            
-            evtSource.onmessage = (event) => {
-                const data = JSON.parse(event.data);
-                
-                if (data.status === 'error') {
-                    evtSource.close();
-                    reject(new Error(data.error || 'Processing failed'));
-                    return;
-                }
-                
-                // Update progress bar
-                const percent = Math.round(data.progress || 0);
-                updateAlertProgress(loadingAlert, percent);
-                
-                // Build phase/status message
-                let statusMsg = data.phase || 'Processing...';
-                if (percent > 0 && percent < 100) {
-                    statusMsg = `Downloading... ${percent}%`;
-                }
-                updateAlertMessage(loadingAlert, statusMsg + `<br><span style="font-size:0.85rem;color:var(--text-secondary)">Trim: ${secondsToHMS(videoState.startTime)} → ${secondsToHMS(videoState.endTime)}</span>`);
-                
-                // Build details
-                let detailsHtml = '';
-                if (percent > 0) {
-                    detailsHtml += `<span>Progress: <strong>${percent}%</strong></span>`;
-                }
-                if (data.speed) {
-                    detailsHtml += `<span>Speed: <strong>${data.speed}</strong></span>`;
-                }
-                if (data.eta && data.eta !== 'Unknown') {
-                    detailsHtml += `<span>ETA: <strong>${data.eta}</strong></span>`;
-                }
-                if (data.size) {
-                    detailsHtml += `<span>Size: <strong>${data.size}</strong></span>`;
-                }
-                if (data.downloaded) {
-                    detailsHtml += `<span>Downloaded: <strong>${data.downloaded}</strong></span>`;
-                }
-                if (detailsHtml) {
-                    updateAlertDetails(loadingAlert, detailsHtml);
-                }
-                
-                // Update progress bar percentage text
-                updateAlertPercentText(loadingAlert, percent);
-                
-                if (data.status === 'done') {
-                    evtSource.close();
-                    resolve(data);
-                }
+            const es = new EventSource(`/api/progress/${taskId}`);
+            es.onmessage = ev => {
+                const p = JSON.parse(ev.data);
+                if (p.status === 'error') { es.close(); reject(new Error(p.error || 'Processing failed')); return; }
+
+                const pct = Math.round(p.progress || 0);
+                setProgress(pct);
+
+                // Phase text
+                let phase = p.phase || 'Processing…';
+                if (pct > 0 && pct < 100 && p.status === 'downloading') phase = `Downloading… ${pct}%`;
+                oPhase.textContent = phase;
+
+                // Stats
+                oSpeed.textContent = p.speed || '—';
+                oEta.textContent = (p.eta && p.eta !== 'Unknown') ? p.eta : '—';
+                oSize.textContent = p.size || '—';
+
+                if (p.status === 'done') { es.close(); resolve(p); }
             };
-            
-            evtSource.onerror = () => {
-                evtSource.close();
-                reject(new Error('Connection to server lost'));
-            };
+            es.onerror = () => { es.close(); reject(new Error('Connection lost — please retry')); };
         });
 
-        // Step 3: Download the file
-        removeAlert(loadingAlert);
+        // 3. Download
+        oPhase.textContent = 'Preparing download…';
+        setProgress(100);
 
-        // Use window.location to trigger native browser download
-        // Server sends Content-Disposition: attachment so page won't navigate away
+        // Trigger native download
         window.location.href = `/api/download/${taskId}`;
 
-        showAlert(`Download Started!<br><span style="font-size:0.85rem;color:var(--text-secondary)">File: ${filename}${fileExt} — check your browser downloads</span>`, 'success', 6000);
-
-        // Cleanup server-side temp files (delay to let download complete)
+        // Hide overlay after short delay
         setTimeout(() => {
-            fetch(`/api/cleanup/${taskId}`, { method: 'POST' }).catch(() => {});
-        }, 120000);
+            showOverlay(false);
+            toast('Download started', `${fname}${ext} — check your browser downloads`, 'success', 5000);
+        }, 800);
 
-    } catch (error) {
-        removeAlert(loadingAlert);
-        showAlert(error.message || 'Error processing video', 'error', 6000);
-        
-        // Cleanup on error too
-        if (taskId) {
-            fetch(`/api/cleanup/${taskId}`, { method: 'POST' }).catch(() => {});
-        }
+        // Cleanup later
+        setTimeout(() => { fetch(`/api/cleanup/${taskId}`, { method: 'POST' }).catch(() => {}); }, 120000);
+
+    } catch (err) {
+        showOverlay(false);
+        toast('Error', err.message, 'error', 6000);
+        if (taskId) fetch(`/api/cleanup/${taskId}`, { method: 'POST' }).catch(() => {});
     } finally {
-        isDownloading = false;
-        downloadBtn.disabled = false;
-        downloadBtn.style.opacity = '1';
-        downloadBtn.style.pointerEvents = '';
-        downloadBtn.querySelector('span:last-child').textContent = 'Trim & Download';
+        state.busy = false;
+        trimBtn.disabled = false;
     }
-});
-
-// Utility function to format bytes
-function formatBytes(bytes) {
-    if (bytes === 0) return '0 Bytes';
-    const k = 1024;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
 }
 
-// Utility function to format speed
-function formatSpeed(bytesPerSec) {
-    return formatBytes(bytesPerSec) + '/s';
+// ===== OVERLAY HELPERS =====
+function showOverlay(show) {
+    overlay.classList.toggle('hidden', !show);
+    if (show) {
+        setProgress(0);
+        oPhase.textContent = 'Starting…';
+        oSpeed.textContent = '—';
+        oEta.textContent = '—';
+        oSize.textContent = '—';
+    }
 }
 
-// ==================== KEYBOARD SHORTCUTS ====================
-document.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter' && videoUrlInput === document.activeElement) {
-        loadBtn.click();
-    }
-});
+function setProgress(pct) {
+    pct = Math.max(0, Math.min(100, pct));
+    ringPct.textContent = pct + '%';
+    const offset = CIRC - (pct / 100) * CIRC;
+    ringFg.style.strokeDashoffset = offset;
+    oBar.style.width = pct + '%';
+}
 
-// ==================== PAGE LOAD ====================
-window.addEventListener('load', () => {
-    console.log('YouTube Trimmer Pro loaded');
-    // Prefill if there's a URL in the input
-    if (videoUrlInput.value) {
-        loadBtn.click();
-    }
-});
+// Add SVG gradient for ring (inject once)
+(function injectRingGradient() {
+    const svg = document.querySelector('.ring-svg');
+    if (!svg) return;
+    const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+    defs.innerHTML = `<linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#7c3aed"/>
+        <stop offset="100%" stop-color="#c084fc"/>
+    </linearGradient>`;
+    svg.insertBefore(defs, svg.firstChild);
+})();
+
+// ===== ENTER KEY ON URL =====
+urlInput.addEventListener('focus', () => hideUrlError());
