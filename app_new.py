@@ -88,13 +88,15 @@ logger.info("="*60)
 # Temporary directory for downloads
 TEMP_DIR = tempfile.gettempdir()
 
-# Cookies file path — place cookies.txt in the app directory to bypass YouTube bot detection
-COOKIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cookies.txt')
-if os.path.exists(COOKIES_FILE):
-    logger.info(f"Cookies file FOUND at: {COOKIES_FILE} (size: {os.path.getsize(COOKIES_FILE)} bytes)")
-else:
-    logger.warning(f"No cookies.txt found at {COOKIES_FILE} — YouTube may block requests from server IPs")
-    logger.warning("To fix: export cookies from your browser and place cookies.txt in the app directory")
+# Check if Node.js is available for yt-dlp JS runtime
+NODE_AVAILABLE = False
+try:
+    _node_check = subprocess.run(['node', '--version'], capture_output=True, text=True, timeout=5)
+    if _node_check.returncode == 0:
+        NODE_AVAILABLE = True
+        logger.info(f"Node.js JS runtime available for yt-dlp: {_node_check.stdout.strip()}")
+except Exception:
+    logger.warning("Node.js not available — yt-dlp may not bypass YouTube bot detection")
 
 # ==================== UTILITY FUNCTIONS ====================
 def is_valid_youtube_url(url):
@@ -121,13 +123,12 @@ def get_ytdlp_base_args(player_client=None):
         '--socket-timeout', '30',
         '--extractor-retries', '5',
     ]
+    # Use Node.js as JS runtime for yt-dlp (required for YouTube PO token generation)
+    if NODE_AVAILABLE:
+        args.extend(['--js-runtimes', 'nodejs'])
     # Set player client for YouTube anti-bot bypass
     if player_client:
         args.extend(['--extractor-args', f'youtube:player_client={player_client}'])
-    # Use cookies if available — critical for server deployments
-    if os.path.exists(COOKIES_FILE):
-        args.extend(['--cookies', COOKIES_FILE])
-        logger.debug("Using cookies.txt for YouTube authentication")
     return args
 
 # Player client strategies to try (in order)
@@ -263,12 +264,9 @@ def get_video_info():
             stderr_lower = stderr_output.lower()
             
             if 'sign in' in stderr_lower or 'bot' in stderr_lower:
-                if os.path.exists(COOKIES_FILE):
-                    error_msg = "YouTube bot detection triggered. Your cookies.txt may be expired — please re-export from browser."
-                else:
-                    error_msg = "YouTube is blocking this server. Please upload cookies.txt via Settings to fix this."
+                error_msg = "YouTube bot detection triggered. Please try again in a moment."
             elif 'age' in stderr_lower:
-                error_msg = "This video requires age verification — upload cookies.txt from a logged-in browser."
+                error_msg = "This video requires age verification and cannot be processed."
             elif 'private' in stderr_lower:
                 error_msg = "This video is private"
             elif 'unavailable' in stderr_lower or 'not available' in stderr_lower:
@@ -839,97 +837,16 @@ def health():
         "yt_dlp": {"installed": ytdlp_ok, "version": ytdlp_version},
         "ffmpeg": {"installed": ffmpeg_ok},
         "pot_provider": {"installed": POT_PROVIDER_AVAILABLE},
-        "cookies": {"has_cookies": os.path.exists(COOKIES_FILE)},
+        "nodejs_runtime": {"available": NODE_AVAILABLE},
         "disk_free_mb": round(disk_free_mb, 1),
         "active_tasks": active_tasks,
         "temp_dir": TEMP_DIR,
         "timestamp": datetime.now().isoformat()
     }
     
-    logger.info(f"Health check | Status: {status} | yt-dlp: {ytdlp_version} | POT: {POT_PROVIDER_AVAILABLE} | Cookies: {os.path.exists(COOKIES_FILE)} | Disk free: {disk_free_mb:.0f} MB | Active tasks: {active_tasks}")
+    logger.info(f"Health check | Status: {status} | yt-dlp: {ytdlp_version} | POT: {POT_PROVIDER_AVAILABLE} | Node.js: {NODE_AVAILABLE} | Disk free: {disk_free_mb:.0f} MB | Active tasks: {active_tasks}")
     
     return jsonify(health_data), 200 if status == 'ok' else 503
-
-
-# ==================== COOKIES MANAGEMENT ====================
-@app.route('/api/upload-cookies', methods=['POST'])
-@error_handler
-def upload_cookies():
-    """Upload cookies.txt for YouTube authentication"""
-    logger.info(f"Cookies upload request | IP: {request.remote_addr}")
-    
-    if 'cookies' not in request.files:
-        # Check if raw text was sent
-        cookies_text = request.form.get('cookies_text', '') or request.json.get('cookies_text', '') if request.is_json else ''
-        if not cookies_text:
-            return jsonify({"error": "No cookies file or text provided"}), 400
-        cookie_content = cookies_text
-    else:
-        cookie_file = request.files['cookies']
-        if cookie_file.filename == '':
-            return jsonify({"error": "No file selected"}), 400
-        cookie_content = cookie_file.read().decode('utf-8', errors='ignore')
-    
-    # Basic validation — Netscape cookie format starts with comments or domain lines
-    lines = [l.strip() for l in cookie_content.strip().split('\n') if l.strip()]
-    valid_lines = [l for l in lines if l.startswith('#') or l.startswith('.') or '\t' in l]
-    
-    if len(valid_lines) < 2:
-        logger.warning("Cookies upload rejected: doesn't look like Netscape cookie format")
-        return jsonify({"error": "Invalid cookies format. Export cookies in Netscape/txt format from your browser."}), 400
-    
-    # Write cookies file
-    try:
-        with open(COOKIES_FILE, 'w') as f:
-            f.write(cookie_content)
-        
-        file_size = os.path.getsize(COOKIES_FILE)
-        cookie_count = len([l for l in lines if not l.startswith('#') and '\t' in l])
-        logger.info(f"Cookies saved | File size: {file_size} bytes | Cookie entries: {cookie_count}")
-        
-        # Quick test — try to fetch a known public video
-        test_result = subprocess.run(
-            get_ytdlp_base_args() + ['--dump-json', '--no-warnings', 'https://www.youtube.com/watch?v=jNQXAC9IVRw'],
-            capture_output=True, text=True, timeout=30
-        )
-        
-        if test_result.returncode == 0:
-            logger.info("Cookies verification: SUCCESS — YouTube access works!")
-            return jsonify({"success": True, "message": f"Cookies saved ({cookie_count} entries). YouTube access verified!"})
-        else:
-            logger.warning(f"Cookies saved but verification failed: {test_result.stderr[:200]}")
-            return jsonify({"success": True, "message": f"Cookies saved ({cookie_count} entries), but verification failed. They may be expired.", "warning": True})
-    
-    except Exception as e:
-        logger.error(f"Failed to save cookies: {type(e).__name__}: {e}")
-        return jsonify({"error": "Failed to save cookies"}), 500
-
-
-@app.route('/api/cookies-status', methods=['GET'])
-def cookies_status():
-    """Check if cookies.txt exists and is valid"""
-    exists = os.path.exists(COOKIES_FILE)
-    size = os.path.getsize(COOKIES_FILE) if exists else 0
-    
-    result = {
-        "has_cookies": exists,
-        "file_size": size,
-    }
-    
-    if exists:
-        try:
-            with open(COOKIES_FILE, 'r') as f:
-                content = f.read()
-            lines = [l for l in content.strip().split('\n') if l.strip() and not l.startswith('#') and '\t' in l]
-            result["cookie_count"] = len(lines)
-            # Check if any youtube cookies exist
-            yt_cookies = [l for l in lines if 'youtube' in l.lower() or 'google' in l.lower()]
-            result["youtube_cookies"] = len(yt_cookies)
-        except Exception:
-            result["cookie_count"] = 0
-            result["youtube_cookies"] = 0
-    
-    return jsonify(result)
 
 
 # ==================== PERIODIC CLEANUP ====================

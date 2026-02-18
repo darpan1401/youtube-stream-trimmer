@@ -9,8 +9,11 @@ __pycache__/
 .idea/
 .DS_Store
 *.mp4
+*.mp3
 *.mkv
 *.mov
+*.part
+*.webm
 instance/
 .pytest_cache/
 *.tmp
