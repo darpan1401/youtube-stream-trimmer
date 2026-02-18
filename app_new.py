@@ -98,6 +98,13 @@ try:
 except Exception:
     logger.warning("Node.js not available — yt-dlp may not bypass YouTube bot detection")
 
+
+def _progress_bar(pct, width=20):
+    """Generate a pip-style progress bar: ━━━━━━━━━━░░░░░░░░░░"""
+    filled = int(width * min(pct, 100) / 100)
+    return '━' * filled + '░' * (width - filled)
+
+
 # ==================== UTILITY FUNCTIONS ====================
 def is_valid_youtube_url(url):
     """Validate if URL is a valid YouTube URL"""
@@ -125,7 +132,7 @@ def get_ytdlp_base_args(player_client=None):
     ]
     # Use Node.js as JS runtime for yt-dlp (required for YouTube PO token generation)
     if NODE_AVAILABLE:
-        args.extend(['--js-runtimes', 'nodejs'])
+        args.extend(['--js-runtimes', 'node'])
     # Set player client for YouTube anti-bot bypass
     if player_client:
         args.extend(['--extractor-args', f'youtube:player_client={player_client}'])
@@ -237,6 +244,7 @@ def index():
 @error_handler
 def get_video_info():
     """Fetch video info using yt-dlp"""
+    req_start = time.time()
     url = request.json.get('url', '').strip()
     
     if not url:
@@ -247,7 +255,7 @@ def get_video_info():
         logger.warning(f"Invalid YouTube URL rejected: {url}")
         return jsonify({"error": "Invalid YouTube URL"}), 400
     
-    logger.info(f"Fetching video info | URL: {url} | IP: {request.remote_addr}")
+    logger.info(f"▶ get_video_info START | URL: {url} | IP: {request.remote_addr}")
     
     try:
         extra_args = ['--dump-json', '--no-warnings']
@@ -293,7 +301,8 @@ def get_video_info():
             logger.warning(f"Video has zero/negative duration: {url} | duration={duration}")
             return jsonify({"error": "Could not determine video duration (live stream or invalid)"}), 400
         
-        logger.info(f"Video info SUCCESS | Title: '{title}' | Duration: {duration}s | Uploader: {uploader}")
+        elapsed = round(time.time() - req_start, 2)
+        logger.info(f"✔ get_video_info SUCCESS in {elapsed}s | Title: '{title}' | Duration: {duration}s | Uploader: {uploader}")
         
         return jsonify({
             "success": True,
@@ -326,7 +335,7 @@ def start_trim():
     quality = data.get('quality', 'best')
     filename = sanitize_filename(data.get('filename', 'trimmed_video'))
     
-    logger.info(f"start-trim request | URL: {url} | Range: {start_time}s-{end_time}s | Quality: {quality} | File: {filename} | IP: {request.remote_addr}")
+    logger.info(f"▶ start-trim REQUEST | URL: {url} | Range: {start_time}s-{end_time}s | Quality: {quality} | File: {filename} | IP: {request.remote_addr}")
     
     # Validation
     if not url or not is_valid_youtube_url(url):
@@ -383,41 +392,19 @@ def start_trim():
     
     def run_ytdlp():
         try:
-            logger.info(f"Task {task_id}: Background thread started")
+            dl_start_time = time.time()
+            last_log_pct = -10  # For pip-style log throttling
+            tid = task_id[:8]  # Short ID for compact logs
             
-            # Find a working player client via quick pre-check
-            working_client = None
-            for client in PLAYER_CLIENT_STRATEGIES:
-                client_name = client or 'default'
-                test_cmd = get_ytdlp_base_args(player_client=client) + [
-                    '--dump-json', '--no-warnings', url
-                ]
-                logger.info(f"Task {task_id}: Testing player_client={client_name}")
-                try:
-                    test = subprocess.run(test_cmd, capture_output=True, text=True, timeout=30)
-                    if test.returncode == 0:
-                        logger.info(f"Task {task_id}: player_client={client_name} works!")
-                        working_client = client
-                        break
-                    else:
-                        stderr_l = (test.stderr or '').lower()
-                        is_bot = any(kw in stderr_l for kw in ['sign in', 'bot', 'confirm', 'cookies'])
-                        if not is_bot:
-                            logger.info(f"Task {task_id}: Non-bot error with {client_name}, using it anyway")
-                            working_client = client
-                            break
-                        logger.info(f"Task {task_id}: Bot-blocked on {client_name}, trying next...")
-                except subprocess.TimeoutExpired:
-                    logger.warning(f"Task {task_id}: Timeout with {client_name}")
+            logger.info(f"[{tid}] ▶ TRIM START | {quality} | {start_time}s→{end_time}s ({trim_duration}s) | {url}")
             
-            if working_client is None and len(PLAYER_CLIENT_STRATEGIES) > 0:
-                working_client = None  # Fall back to default (no restriction)
-                logger.warning(f"Task {task_id}: All clients failed pre-check, using default")
+            with tasks_lock:
+                tasks[task_id]['status'] = 'downloading'
+                tasks[task_id]['phase'] = 'Preparing download...'
             
-            cmd = get_ytdlp_base_args(player_client=working_client) + [
+            cmd = get_ytdlp_base_args() + [
                 '-f', quality_map.get(quality, quality_map['best']),
                 '--download-sections', f'*{start_time}-{end_time}',
-                '--concurrent-fragments', '16',
                 '--fragment-retries', '5',
                 '--retries', '5',
                 '--buffer-size', '16K',
@@ -443,79 +430,108 @@ def start_trim():
             
             cmd.append(url)
             
-            logger.info(f"Task {task_id}: Executing yt-dlp command: {' '.join(cmd)}")
+            logger.info(f"[{tid}] CMD: {' '.join(cmd[:6])} ... {cmd[-1]}")
             
             with tasks_lock:
                 tasks[task_id]['status'] = 'downloading'
                 tasks[task_id]['phase'] = 'Downloading...'
             
+            # Use binary mode + unbuffered to catch \r-separated ffmpeg progress
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1
+                bufsize=0
             )
             
-            for line in iter(process.stdout.readline, ''):
-                line = line.strip()
-                if not line:
-                    continue
-                
-                # Parse yt-dlp progress output
-                # Pattern for --progress-template output
-                if '|' in line and '%' in line:
-                    parts = line.split('|')
-                    if len(parts) >= 5:
-                        try:
-                            pct_str = parts[0].strip().replace('%', '')
-                            pct = float(pct_str)
+            # Read byte-by-byte to handle both \r and \n separators
+            # (ffmpeg uses \r for in-place progress, yt-dlp uses \n)
+            buf = b''
+            while True:
+                byte = process.stdout.read(1)
+                if not byte:
+                    break
+                if byte in (b'\r', b'\n'):
+                    if buf:
+                        line = buf.decode('utf-8', errors='replace').strip()
+                        buf = b''
+                        if not line:
+                            continue
+                        
+                        # --- Parse yt-dlp progress-template output ---
+                        if '|' in line and '%' in line:
+                            parts = line.split('|')
+                            if len(parts) >= 5:
+                                try:
+                                    pct = float(parts[0].strip().replace('%', ''))
+                                    speed = parts[1].strip() if parts[1].strip() != 'NA' else ''
+                                    eta = parts[2].strip() if parts[2].strip() != 'NA' else ''
+                                    total_size = parts[3].strip() if parts[3].strip() != 'NA' else ''
+                                    downloaded = parts[4].strip() if parts[4].strip() != 'NA' else ''
+                                    with tasks_lock:
+                                        tasks[task_id]['progress'] = min(pct, 100)
+                                        tasks[task_id]['speed'] = speed
+                                        tasks[task_id]['eta'] = eta
+                                        tasks[task_id]['size'] = total_size
+                                        tasks[task_id]['downloaded'] = downloaded
+                                    # Pip-style log every 10%
+                                    if pct >= last_log_pct + 10 or pct >= 100:
+                                        bar = _progress_bar(pct)
+                                        logger.info(f"[{tid}] {bar} {pct:5.1f}% | {speed or '-':>10} | ETA {eta or '-':>6} | {downloaded or '-'}/{total_size or '-'}")
+                                        last_log_pct = pct
+                                except (ValueError, IndexError):
+                                    pass
+                        
+                        # --- Parse ffmpeg time= output (main progress source for --download-sections) ---
+                        elif 'time=' in line and 'speed=' in line:
+                            time_match = re.search(r'time=(\d+):(\d+):(\d+\.?\d*)', line)
+                            speed_match = re.search(r'speed=\s*(\S+)', line)
+                            size_match = re.search(r'size=\s*(\S+)', line)
+                            if time_match and trim_duration > 0:
+                                t_h, t_m, t_s = int(time_match.group(1)), int(time_match.group(2)), float(time_match.group(3))
+                                current_sec = t_h * 3600 + t_m * 60 + t_s
+                                pct = min((current_sec / trim_duration) * 90, 90)  # Cap at 90%, post-processing takes 90-100
+                                ffmpeg_speed = speed_match.group(1) if speed_match else ''
+                                ffmpeg_size = size_match.group(1) if size_match else ''
+                                remaining = trim_duration - current_sec
+                                with tasks_lock:
+                                    tasks[task_id]['progress'] = pct
+                                    tasks[task_id]['speed'] = ffmpeg_speed
+                                    tasks[task_id]['eta'] = f'{remaining:.0f}s' if remaining > 0 else '0s'
+                                    tasks[task_id]['size'] = ffmpeg_size
+                                    tasks[task_id]['phase'] = f'Processing... {pct:.0f}%'
+                                # Pip-style log every 10%
+                                if pct >= last_log_pct + 10:
+                                    bar = _progress_bar(pct)
+                                    logger.info(f"[{tid}] {bar} {pct:5.1f}% | {ffmpeg_speed:>10} | ~{remaining:.0f}s left | {ffmpeg_size}")
+                                    last_log_pct = pct
+                        
+                        # --- Parse [download] fallback ---
+                        elif '[download]' in line and '%' in line:
+                            match = re.search(r'(\d+\.?\d*)%', line)
+                            if match:
+                                pct = float(match.group(1))
+                                with tasks_lock:
+                                    tasks[task_id]['progress'] = min(pct, 100)
+                        
+                        # --- Detect post-processing ---
+                        elif '[Merger]' in line or '[ExtractAudio]' in line or '[ffmpeg]' in line:
+                            logger.info(f"[{tid}] ⚙ Post-processing...")
                             with tasks_lock:
-                                tasks[task_id]['progress'] = min(pct, 100)
-                                tasks[task_id]['speed'] = parts[1].strip() if parts[1].strip() != 'NA' else ''
-                                tasks[task_id]['eta'] = parts[2].strip() if parts[2].strip() != 'NA' else ''
-                                tasks[task_id]['size'] = parts[3].strip() if parts[3].strip() != 'NA' else ''
-                                tasks[task_id]['downloaded'] = parts[4].strip() if parts[4].strip() != 'NA' else ''
-                        except (ValueError, IndexError):
-                            pass
-                
-                # Fallback: parse standard yt-dlp progress lines
-                elif '[download]' in line and '%' in line:
-                    match = re.search(r'(\d+\.?\d*)%', line)
-                    if match:
-                        pct = float(match.group(1))
-                        with tasks_lock:
-                            tasks[task_id]['progress'] = min(pct, 100)
-                    
-                    speed_match = re.search(r'at\s+(\S+/s)', line)
-                    if speed_match:
-                        with tasks_lock:
-                            tasks[task_id]['speed'] = speed_match.group(1)
-                    
-                    eta_match = re.search(r'ETA\s+(\S+)', line)
-                    if eta_match:
-                        with tasks_lock:
-                            tasks[task_id]['eta'] = eta_match.group(1)
-                    
-                    size_match = re.search(r'of\s+~?\s*(\S+)', line)
-                    if size_match:
-                        with tasks_lock:
-                            tasks[task_id]['size'] = size_match.group(1)
-                
-                # Detect merging/postprocessing phase
-                elif '[Merger]' in line or '[ExtractAudio]' in line or '[ffmpeg]' in line:
-                    with tasks_lock:
-                        tasks[task_id]['phase'] = 'Merging & processing...'
-                        tasks[task_id]['progress'] = 95
-                
-                logger.debug(f"Task {task_id} yt-dlp: {line}")
+                                tasks[task_id]['phase'] = 'Merging & processing...'
+                                tasks[task_id]['progress'] = 95
+                        
+                        # --- Log important yt-dlp info lines (not progress noise) ---
+                        elif line.startswith('[') and 'download' not in line.lower():
+                            logger.info(f"[{tid}] {line}")
+                else:
+                    buf += byte
             
             process.wait()
-            
-            logger.info(f"Task {task_id}: yt-dlp process exited with code {process.returncode}")
+            dl_elapsed = round(time.time() - dl_start_time, 2)
             
             if process.returncode != 0:
-                logger.error(f"Task {task_id}: yt-dlp FAILED with exit code {process.returncode}")
+                logger.error(f"[{tid}] ✘ FAILED | exit={process.returncode} | {dl_elapsed}s")
                 with tasks_lock:
                     tasks[task_id]['status'] = 'error'
                     tasks[task_id]['error'] = 'Failed to trim video. Check video availability.'
@@ -544,7 +560,8 @@ def start_trim():
                 dl_name = f"{filename}.mp4"
             
             file_size = os.path.getsize(actual_file)
-            logger.info(f"Task {task_id}: File ready. Size: {file_size / (1024*1024):.2f} MB")
+            total_elapsed = round(time.time() - dl_start_time, 2)
+            logger.info(f"[{tid}] ✔ DONE | {dl_name} | {file_size / (1024*1024):.2f} MB | {total_elapsed}s")
             
             with tasks_lock:
                 tasks[task_id]['status'] = 'done'
@@ -556,8 +573,8 @@ def start_trim():
                 tasks[task_id]['file_size'] = file_size
         
         except Exception as e:
-            logger.error(f"Task {task_id} EXCEPTION: {type(e).__name__}: {e}")
-            logger.error(f"Task {task_id} traceback:\n{traceback.format_exc()}")
+            logger.error(f"[{tid}] ✘ EXCEPTION: {type(e).__name__}: {e}")
+            logger.error(traceback.format_exc())
             with tasks_lock:
                 tasks[task_id]['status'] = 'error'
                 tasks[task_id]['error'] = str(e)
@@ -565,7 +582,7 @@ def start_trim():
     # Start background thread
     thread = threading.Thread(target=run_ytdlp, daemon=True)
     thread.start()
-    logger.info(f"Task {task_id}: Background download thread started")
+    logger.info(f"[{task_id[:8]}] Thread started")
     
     return jsonify({"task_id": task_id})
 
@@ -573,14 +590,16 @@ def start_trim():
 @app.route('/api/progress/<task_id>')
 def progress(task_id):
     """SSE endpoint for real-time progress updates"""
-    logger.info(f"SSE progress stream opened for task {task_id}")
+    logger.info(f"SSE: Stream opened | {task_id[:8]}")
+    sse_start = time.time()
+    sse_last_log = -20
     def generate():
+        nonlocal sse_last_log
         while True:
             with tasks_lock:
                 task = tasks.get(task_id)
             
             if not task:
-                logger.warning(f"SSE: Task {task_id} not found in task store")
                 yield f"data: {json.dumps({'status': 'error', 'error': 'Task not found'})}\n\n"
                 break
             
@@ -597,13 +616,13 @@ def progress(task_id):
             if task['status'] == 'done':
                 event_data['file_size'] = task.get('file_size', 0)
                 event_data['file_name'] = task.get('file_name', '')
-                logger.info(f"SSE: Task {task_id} completed | File: {event_data['file_name']} | Size: {event_data['file_size']} bytes")
+                logger.info(f"SSE: ✔ Done | {task_id[:8]} | {round(time.time()-sse_start,1)}s")
                 yield f"data: {json.dumps(event_data)}\n\n"
                 break
             
             if task['status'] == 'error':
                 event_data['error'] = task.get('error', 'Unknown error')
-                logger.error(f"SSE: Task {task_id} failed | Error: {event_data['error']}")
+                logger.error(f"SSE: ✘ Error | {task_id[:8]} | {event_data['error']}")
                 yield f"data: {json.dumps(event_data)}\n\n"
                 break
             
@@ -624,26 +643,26 @@ def progress(task_id):
 @app.route('/api/download/<task_id>')
 def download_file(task_id):
     """Download the completed file"""
-    logger.info(f"Download requested for task {task_id} | IP: {request.remote_addr}")
+    logger.info(f"▶ DOWNLOAD REQUEST | {task_id[:8]}")
     
     with tasks_lock:
         task = tasks.get(task_id)
     
     if not task:
-        logger.warning(f"Download failed: Task {task_id} not found")
+        logger.warning(f"Download FAILED: Task {task_id} not found in store")
         return jsonify({"error": "Task not found"}), 404
     
     if task['status'] != 'done':
-        logger.warning(f"Download failed: Task {task_id} not ready (status: {task['status']})")
+        logger.warning(f"Download FAILED: Task {task_id} not ready | Current status: {task['status']} | Progress: {task['progress']}%")
         return jsonify({"error": "File not ready"}), 400
     
     file_path = task['file_path']
     if not file_path or not os.path.exists(file_path):
-        logger.error(f"Download failed: File not found at {file_path} for task {task_id}")
+        logger.error(f"Download FAILED: File missing | Path: {file_path} | Task: {task_id}")
         return jsonify({"error": "File not found"}), 404
     
     file_size = os.path.getsize(file_path)
-    logger.info(f"Serving download | Task: {task_id} | File: {task['file_name']} | Size: {file_size / (1024*1024):.2f} MB | Mime: {task['mimetype']}")
+    logger.info(f"Download: Serving {task['file_name']} | {file_size / (1024*1024):.2f} MB")
     
     return send_file(
         file_path,

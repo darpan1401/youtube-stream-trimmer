@@ -128,8 +128,9 @@ urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') loadVideo(); 
 
 async function loadVideo() {
     const url = urlInput.value.trim();
+    console.log('[ClipForge] loadVideo called | URL:', url);
     if (!url) { showUrlError('Please paste a YouTube URL'); return; }
-    if (state.busy) return;
+    if (state.busy) { console.log('[ClipForge] loadVideo blocked — busy'); return; }
 
     state.busy = true;
     setLoading(true);
@@ -138,12 +139,15 @@ async function loadVideo() {
     skeleton.classList.remove('hidden');
 
     try {
+        console.log('[ClipForge] Fetching video info...');
+        const t0 = performance.now();
         const res = await fetch('/api/get-video-info', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url })
         });
         const data = await res.json();
+        console.log('[ClipForge] Video info response:', res.status, data, `(${Math.round(performance.now()-t0)}ms)`);
 
         if (!res.ok || !data.success) {
             throw new Error(data.error || 'Failed to load video');
@@ -170,9 +174,11 @@ async function loadVideo() {
 
         skeleton.classList.add('hidden');
         editor.classList.remove('hidden');
+        console.log('[ClipForge] Video loaded successfully:', state.title, '| Duration:', state.duration + 's');
         toast('Video loaded', state.title, 'success', 3000);
 
     } catch (err) {
+        console.error('[ClipForge] loadVideo ERROR:', err.message);
         skeleton.classList.add('hidden');
         showUrlError(err.message);
         toast('Error', err.message, 'error', 5000);
@@ -318,7 +324,8 @@ qualityRow.addEventListener('click', e => {
 trimBtn.addEventListener('click', startTrim);
 
 async function startTrim() {
-    if (state.busy || !state.url) return;
+    console.log('[ClipForge] startTrim called | URL:', state.url, '| Range:', state.start + 's -', state.end + 's | Quality:', state.quality);
+    if (state.busy || !state.url) { console.log('[ClipForge] startTrim blocked — busy:', state.busy, '| url:', !!state.url); return; }
     const dur = state.end - state.start;
     if (dur <= 0) { toast('Invalid range', 'End time must be after start time', 'warning'); return; }
 
@@ -330,9 +337,11 @@ async function startTrim() {
     const isAudio = state.quality === 'audio';
     const ext = isAudio ? '.mp3' : '.mp4';
     let taskId = null;
+    const trimStartTime = performance.now();
 
     try {
         // 1. Start trim
+        console.log('[ClipForge] Sending start-trim request...');
         const res = await fetch('/api/start-trim', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -345,17 +354,35 @@ async function startTrim() {
             })
         });
         const d = await res.json();
+        console.log('[ClipForge] start-trim response:', res.status, d);
         if (!res.ok) throw new Error(d.error || 'Failed to start');
         taskId = d.task_id;
+        console.log('[ClipForge] Task created:', taskId);
 
         // 2. SSE progress
+        console.log('[ClipForge] Opening SSE stream for task:', taskId);
+        let sseEventCount = 0;
+        let lastLoggedPct = -1;
         await new Promise((resolve, reject) => {
             const es = new EventSource(`/api/progress/${taskId}`);
             es.onmessage = ev => {
                 const p = JSON.parse(ev.data);
-                if (p.status === 'error') { es.close(); reject(new Error(p.error || 'Processing failed')); return; }
+                sseEventCount++;
+                
+                if (p.status === 'error') {
+                    console.error('[ClipForge] SSE ERROR:', p.error, '| Events received:', sseEventCount);
+                    es.close(); reject(new Error(p.error || 'Processing failed')); return;
+                }
 
                 const pct = Math.round(p.progress || 0);
+                
+                // Log every 10% change or status change
+                if (pct >= lastLoggedPct + 10 || p.status === 'done') {
+                    const elapsed = Math.round((performance.now() - trimStartTime) / 1000);
+                    console.log(`[ClipForge] SSE #${sseEventCount} | Status: ${p.status} | Progress: ${pct}% | Speed: ${p.speed} | ETA: ${p.eta} | Size: ${p.size} | Elapsed: ${elapsed}s`);
+                    lastLoggedPct = pct;
+                }
+                
                 setProgress(pct);
 
                 // Phase text
@@ -368,12 +395,20 @@ async function startTrim() {
                 oEta.textContent = (p.eta && p.eta !== 'Unknown') ? p.eta : '—';
                 oSize.textContent = p.size || '—';
 
-                if (p.status === 'done') { es.close(); resolve(p); }
+                if (p.status === 'done') {
+                    const totalTime = Math.round((performance.now() - trimStartTime) / 1000);
+                    console.log(`[ClipForge] ✔ DOWNLOAD COMPLETE | Total time: ${totalTime}s | Events: ${sseEventCount} | File: ${p.file_name} | Size: ${p.file_size} bytes`);
+                    es.close(); resolve(p);
+                }
             };
-            es.onerror = () => { es.close(); reject(new Error('Connection lost — please retry')); };
+            es.onerror = (e) => {
+                console.error('[ClipForge] SSE connection error:', e, '| Events received:', sseEventCount);
+                es.close(); reject(new Error('Connection lost — please retry'));
+            };
         });
 
         // 3. Download
+        console.log('[ClipForge] Triggering file download for task:', taskId);
         oPhase.textContent = 'Preparing download…';
         setProgress(100);
 
@@ -390,6 +425,7 @@ async function startTrim() {
         setTimeout(() => { fetch(`/api/cleanup/${taskId}`, { method: 'POST' }).catch(() => {}); }, 120000);
 
     } catch (err) {
+        console.error('[ClipForge] startTrim ERROR:', err.message, err);
         showOverlay(false);
         toast('Error', err.message, 'error', 6000);
         if (taskId) fetch(`/api/cleanup/${taskId}`, { method: 'POST' }).catch(() => {});
