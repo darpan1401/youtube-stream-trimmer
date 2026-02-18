@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Lightning-fast YouTube video trimmer. Download, trim, and edit videos instantly.">
+    <title>YouTube Video Trimmer Pro</title>
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=4">
+</head>
+<body>
+    <div class="background-animation"></div>
+    
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo-section">
+                <div class="logo-icon"><i class="fas fa-film"></i></div>
+                <div>
+                    <h1>YouTube Trimmer Pro</h1>
+                    <p class="subtitle">Clean • Fast • Offline</p>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Step 1: URL Input -->
+            <section class="card step-card">
+                <div class="step-header">
+                    <span class="step-number">01</span>
+                    <h2>Paste YouTube Link</h2>
+                </div>
+                
+                <div class="input-group">
+                    <input 
+                        type="text" 
+                        id="videoUrl" 
+                        class="url-input"
+                        placeholder="Enter YouTube video or live stream URL..."
+                    >
+                    <button class="btn btn-primary" id="loadBtn">
+                        <span class="btn-icon"><i class="fas fa-download"></i></span>
+                        <span>Load Video</span>
+                    </button>
+                </div>
+                
+                <div id="loadingSpinner" class="loading hidden">
+                    <div class="spinner"></div>
+                    <p>Fetching video information...</p>
+                </div>
+            </section>
+
+            <!-- Step 2: Video Info & Trimming -->
+            <section id="videoSection" class="card step-card hidden">
+                <div class="step-header">
+                    <span class="step-number">02</span>
+                    <h2>Trim Your Video</h2>
+                </div>
+
+                <!-- Video Info -->
+                <div class="video-info">
+                    <div class="thumbnail-wrapper">
+                        <img id="videoThumbnail" class="thumbnail" src="" alt="Video thumbnail">
+                        <div class="duration-badge" id="durationBadge">00:00</div>
+                    </div>
+                    
+                    <div class="video-details">
+                        <h3 id="videoTitle">Video Title</h3>
+                        <p id="videoUploader" class="uploader">Uploader</p>
+                        <div class="duration-info">
+                            <span class="duration-label">Total Duration:</span>
+                            <span id="totalDuration" class="duration-value">00:00:00</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Quality Selection -->
+                <div class="settings-group">
+                    <label for="qualitySelect">Video Quality</label>
+                    <div class="quality-grid">
+                        <button class="quality-btn active" data-quality="best">
+                            <span class="quality-icon"><i class="fas fa-star"></i></span>
+                            <span>Best</span>
+                        </button>
+                        <button class="quality-btn" data-quality="1080">
+                            <span class="quality-icon"><i class="fas fa-video"></i></span>
+                            <span>1080p</span>
+                        </button>
+                        <button class="quality-btn" data-quality="720">
+                            <span class="quality-icon"><i class="fas fa-tv"></i></span>
+                            <span>720p</span>
+                        </button>
+                        <button class="quality-btn" data-quality="480">
+                            <span class="quality-icon"><i class="fas fa-mobile-alt"></i></span>
+                            <span>480p</span>
+                        </button>
+                        <button class="quality-btn" data-quality="audio">
+                            <span class="quality-icon"><i class="fas fa-music"></i></span>
+                            <span>Audio Only</span>
+                        </button>
+                    </div>
+                    <input type="hidden" id="selectedQuality" value="best">
+                </div>
+
+                <!-- Timeline Slider -->
+                <div class="timeline-section">
+                    <h4>Select Trim Range</h4>
+                    <div class="timeline-wrapper">
+                        <div class="time-display">
+                            <div class="time-box">
+                                <label>Start</label>
+                                <span id="startTimeDisplay" class="time-value">00:00:00</span>
+                            </div>
+                            <div class=\"time-divider\"><i class=\"fas fa-arrow-right\"></i></div>
+                            <div class="time-box">
+                                <label>End</label>
+                                <span id="endTimeDisplay" class="time-value">00:00:00</span>
+                            </div>
+                            <div class="time-box highlight">
+                                <label>Duration</label>
+                                <span id="trimDurationDisplay" class="time-value">00:00:00</span>
+                            </div>
+                        </div>
+                        
+                        <div class="range-slider-wrapper" id="rangeSlider">
+                            <div class="slider-track"></div>
+                            <div class="slider-highlight" id="sliderHighlight"></div>
+                            <div class="slider-handle handle-start" id="handleStart" tabindex="0">
+                                <div class="handle-tooltip" id="tooltipStart">00:00:00</div>
+                            </div>
+                            <div class="slider-handle handle-end" id="handleEnd" tabindex="0">
+                                <div class="handle-tooltip" id="tooltipEnd">00:00:00</div>
+                            </div>
+                        </div>
+
+                        <div class="precise-input">
+                            <div class="input-field">
+                                <label>Start (sec)</label>
+                                <input type="number" id="startSecInput" class="time-precise-input" min="0" value="0">
+                            </div>
+                            <div class="input-field">
+                                <label>End (sec)</label>
+                                <input type="number" id="endSecInput" class="time-precise-input" min="0" value="0">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Output Filename -->
+                <div class="settings-group">
+                    <label for="outputName">Output Filename</label>
+                    <div class="input-group">
+                        <input 
+                            type="text" 
+                            id="outputName"
+                            class="url-input"
+                            placeholder="e.g., my_video_trim"
+                            value="youtube_trim"
+                        >
+                        <span class="input-suffix">.mp4</span>
+                    </div>
+                </div>
+
+                <!-- Download Button -->
+                <button class="btn btn-success" id="downloadBtn">
+                    <span class="btn-icon"><i class="fas fa-arrow-down"></i></span>
+                    <span>Trim & Download</span>
+                </button>
+            </section>
+        </main>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>Crafted with <i class="fas fa-heart" style="color: #ff416c;"></i> by Darpan | © 2026 YouTube Trimmer Pro</p>
+        </footer>
+    </div>
+
+    <script src="{{ url_for('static', filename='script.js') }}?v=4"></script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: youtube-trimmer-pro
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: FLASK_ENV
+        value: production
+      - key: PORT
+        value: "2000"
