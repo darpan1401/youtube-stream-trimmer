@@ -131,18 +131,21 @@ def get_ytdlp_base_args(player_client=None):
     return args
 
 # Player client strategies to try (in order)
-# PO token provider works best with 'web' client
-# Fallback clients that sometimes bypass bot detection without cookies
+# None = no restriction (default, works locally and most servers)
+# Fallback clients are tried only when bot-detection is triggered
 PLAYER_CLIENT_STRATEGIES = [
-    'web',           # Default web client (PO token provider handles auth)
-    'mweb',          # Mobile web — sometimes bypasses bot checks  
-    'tv_embedded',   # TV embedded player — often works on datacenter IPs
+    None,            # Default — no player_client restriction (best compatibility)
+    'mweb',          # Mobile web — often bypasses bot checks
+    'tv_embedded',   # TV embedded player — works on many datacenter IPs
     'mediaconnect',  # Media connect client
+    'web',           # Web client (needs PO token provider for servers)
 ]
 
 def run_ytdlp_with_retry(extra_args, url, timeout=60, description="yt-dlp"):
     """
     Run yt-dlp with automatic retry using different player clients.
+    First tries without any player_client restriction (most compatible).
+    Only falls back to specific clients on bot-detection errors.
     Returns (success, result) tuple.
     """
     last_result = None
@@ -151,10 +154,11 @@ def run_ytdlp_with_retry(extra_args, url, timeout=60, description="yt-dlp"):
     for i, client in enumerate(PLAYER_CLIENT_STRATEGIES):
         cmd = get_ytdlp_base_args(player_client=client) + extra_args + [url]
         
+        client_name = client or 'default'
         if i == 0:
-            logger.info(f"{description}: Trying player_client={client} | URL: {url}")
+            logger.info(f"{description}: Trying player_client={client_name} | URL: {url}")
         else:
-            logger.info(f"{description}: Retry #{i} with player_client={client} | URL: {url}")
+            logger.info(f"{description}: Retry #{i} with player_client={client_name} | URL: {url}")
         
         logger.debug(f"Command: {' '.join(cmd)}")
         
@@ -168,29 +172,31 @@ def run_ytdlp_with_retry(extra_args, url, timeout=60, description="yt-dlp"):
             last_result = result
             
             if result.returncode == 0:
-                logger.info(f"{description}: SUCCESS with player_client={client}")
+                logger.info(f"{description}: SUCCESS with player_client={client_name}")
                 return True, result
             
             last_stderr = result.stderr.strip() if result.stderr else ''
-            logger.warning(f"{description}: FAILED with player_client={client} | Exit: {result.returncode} | Error: {last_stderr[:200]}")
+            logger.warning(f"{description}: FAILED with player_client={client_name} | Exit: {result.returncode} | Error: {last_stderr[:200]}")
             
-            # Only retry on bot-detection / auth errors
+            # Only retry with different client on bot-detection / auth errors
             stderr_lower = last_stderr.lower()
             is_bot_error = any(kw in stderr_lower for kw in ['sign in', 'bot', 'confirm', 'cookies', 'authentication'])
             
             if not is_bot_error:
-                # Not a bot error — no point retrying with different client
+                # Not a bot error — retrying with different client won't help
                 logger.info(f"{description}: Error is not bot-related, skipping further retries")
                 break
+            
+            logger.info(f"{description}: Bot detection detected, will try next client...")
         
         except subprocess.TimeoutExpired:
-            logger.error(f"{description}: TIMEOUT with player_client={client} after {timeout}s")
+            logger.error(f"{description}: TIMEOUT with player_client={client_name} after {timeout}s")
             last_result = None
             last_stderr = f"Timeout after {timeout}s"
             continue
     
     # All retries failed
-    logger.error(f"{description}: ALL player clients failed for URL: {url}")
+    logger.error(f"{description}: ALL strategies failed for URL: {url}")
     logger.error(f"{description}: Last stderr: {last_stderr}")
     return False, last_result
 
@@ -381,33 +387,36 @@ def start_trim():
         try:
             logger.info(f"Task {task_id}: Background thread started")
             
-            # Try different player clients for the download
-            download_cmd = None
-            for client_idx, client in enumerate(PLAYER_CLIENT_STRATEGIES):
+            # Find a working player client via quick pre-check
+            working_client = None
+            for client in PLAYER_CLIENT_STRATEGIES:
+                client_name = client or 'default'
                 test_cmd = get_ytdlp_base_args(player_client=client) + [
                     '--dump-json', '--no-warnings', url
                 ]
-                logger.info(f"Task {task_id}: Testing player_client={client}")
+                logger.info(f"Task {task_id}: Testing player_client={client_name}")
                 try:
                     test = subprocess.run(test_cmd, capture_output=True, text=True, timeout=30)
                     if test.returncode == 0:
-                        logger.info(f"Task {task_id}: player_client={client} works!")
-                        download_cmd = get_ytdlp_base_args(player_client=client)
+                        logger.info(f"Task {task_id}: player_client={client_name} works!")
+                        working_client = client
                         break
                     else:
                         stderr_l = (test.stderr or '').lower()
-                        if not any(kw in stderr_l for kw in ['sign in', 'bot', 'confirm', 'cookies']):
-                            logger.info(f"Task {task_id}: Non-bot error with {client}, using it anyway")
-                            download_cmd = get_ytdlp_base_args(player_client=client)
+                        is_bot = any(kw in stderr_l for kw in ['sign in', 'bot', 'confirm', 'cookies'])
+                        if not is_bot:
+                            logger.info(f"Task {task_id}: Non-bot error with {client_name}, using it anyway")
+                            working_client = client
                             break
+                        logger.info(f"Task {task_id}: Bot-blocked on {client_name}, trying next...")
                 except subprocess.TimeoutExpired:
-                    pass
+                    logger.warning(f"Task {task_id}: Timeout with {client_name}")
             
-            if download_cmd is None:
-                download_cmd = get_ytdlp_base_args(player_client='web')
-                logger.warning(f"Task {task_id}: All clients failed pre-check, falling back to web")
+            if working_client is None and len(PLAYER_CLIENT_STRATEGIES) > 0:
+                working_client = None  # Fall back to default (no restriction)
+                logger.warning(f"Task {task_id}: All clients failed pre-check, using default")
             
-            cmd = download_cmd + [
+            cmd = get_ytdlp_base_args(player_client=working_client) + [
                 '-f', quality_map.get(quality, quality_map['best']),
                 '--download-sections', f'*{start_time}-{end_time}',
                 '--concurrent-fragments', '16',
@@ -711,7 +720,7 @@ def trim_video():
             file_ext = 'mp3' if is_audio else 'mp4'
             output_path = os.path.join(tmpdir, f"{filename}.{file_ext}")
             
-            cmd = get_ytdlp_base_args(player_client='web') + [
+            cmd = get_ytdlp_base_args() + [
                 '-f', quality_map.get(quality, quality_map['best']),
                 '--download-sections', f'*{start_time}-{end_time}',
                 '--concurrent-fragments', '16',
