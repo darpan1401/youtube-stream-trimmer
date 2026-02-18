@@ -536,31 +536,23 @@ downloadBtn.addEventListener('click', async () => {
             };
         });
 
-        // Step 3: Download the file
-        updateAlertMessage(loadingAlert, `Downloading file...<br><span style="font-size:0.85rem;color:var(--text-secondary)">Preparing download...</span>`);
-        updateAlertProgress(loadingAlert, 100);
+        // Step 3: Download the file — use direct browser download (no fetch+blob)
+        removeAlert(loadingAlert);
 
-        const downloadResponse = await fetch(`/api/download/${taskId}`);
-        
-        if (!downloadResponse.ok) {
-            throw new Error('Failed to download file');
-        }
-
-        const blob = await downloadResponse.blob();
-        const downloadUrl = window.URL.createObjectURL(blob);
         const a = document.createElement('a');
-        a.href = downloadUrl;
+        a.href = `/api/download/${taskId}`;
         a.download = filename + fileExt;
+        a.style.display = 'none';
         document.body.appendChild(a);
         a.click();
-        window.URL.revokeObjectURL(downloadUrl);
         document.body.removeChild(a);
 
-        removeAlert(loadingAlert);
-        showAlert(`Download Complete!<br><span style="font-size:0.85rem;color:var(--text-secondary)">File: ${filename}${fileExt} (${formatBytes(blob.size)})</span>`, 'success', 6000);
+        showAlert(`Download Started!<br><span style="font-size:0.85rem;color:var(--text-secondary)">File: ${filename}${fileExt} — check your browser downloads</span>`, 'success', 6000);
 
-        // Cleanup server-side temp files
-        fetch(`/api/cleanup/${taskId}`, { method: 'POST' }).catch(() => {});
+        // Cleanup server-side temp files (delay to let download begin)
+        setTimeout(() => {
+            fetch(`/api/cleanup/${taskId}`, { method: 'POST' }).catch(() => {});
+        }, 30000);
 
     } catch (error) {
         removeAlert(loadingAlert);
