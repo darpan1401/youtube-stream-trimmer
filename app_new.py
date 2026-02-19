@@ -196,16 +196,21 @@ def run_ytdlp_with_retry(extra_args, url, timeout=60, description="yt-dlp"):
             last_stderr = result.stderr.strip() if result.stderr else ''
             logger.warning(f"{description}: FAILED with player_client={client_name} | Exit: {result.returncode} | Error: {last_stderr[:200]}")
             
-            # Only retry with different client on bot-detection / auth errors
+            # Retry with next client on bot-detection, auth errors, OR format errors
+            # (some player clients don't support certain video types like live streams)
             stderr_lower = last_stderr.lower()
-            is_bot_error = any(kw in stderr_lower for kw in ['sign in', 'bot', 'confirm', 'cookies', 'authentication'])
+            is_retriable = any(kw in stderr_lower for kw in [
+                'sign in', 'bot', 'confirm', 'cookies', 'authentication',
+                'requested format', 'not available', 'format is not',
+                'no video formats', 'unavailable',
+            ])
             
-            if not is_bot_error:
-                # Not a bot error — retrying with different client won't help
-                logger.info(f"{description}: Error is not bot-related, skipping further retries")
+            if not is_retriable:
+                # Truly unrecoverable error — retrying with different client won't help
+                logger.info(f"{description}: Error is not retriable, skipping further retries")
                 break
             
-            logger.info(f"{description}: Bot detection detected, waiting 2s before trying next client...")
+            logger.info(f"{description}: Retriable error detected, waiting 2s before trying next client...")
             time.sleep(2)  # Small delay between retries to avoid rate-limiting
         
         except subprocess.TimeoutExpired:
@@ -413,7 +418,8 @@ def start_trim():
                 tasks[task_id]['status'] = 'downloading'
                 tasks[task_id]['phase'] = 'Preparing download...'
             
-            cmd = get_ytdlp_base_args(player_client='web_creator') + [
+            # Build base trim args (without player_client — added per retry)
+            base_extra_args = [
                 '-f', quality_map.get(quality, quality_map['best']),
                 '--download-sections', f'*{start_time}-{end_time}',
                 '--fragment-retries', '5',
@@ -425,7 +431,7 @@ def start_trim():
             ]
             
             if is_audio:
-                cmd.extend([
+                base_extra_args.extend([
                     '-x',
                     '--audio-format', 'mp3',
                     '--audio-quality', '0',
@@ -433,120 +439,164 @@ def start_trim():
                     '-o', output_path,
                 ])
             else:
-                cmd.extend([
+                base_extra_args.extend([
                     '--merge-output-format', 'mp4',
                     '--postprocessor-args', 'ffmpeg:-c copy -movflags +faststart',
                     '-o', output_path,
                 ])
             
-            cmd.append(url)
+            base_extra_args.append(url)
             
-            logger.info(f"[{tid}] CMD: {' '.join(cmd[:6])} ... {cmd[-1]}")
+            # Try each player client strategy until one works
+            process = None
+            for strategy_idx, client in enumerate(PLAYER_CLIENT_STRATEGIES):
+                client_name = client or 'default'
+                cmd = get_ytdlp_base_args(player_client=client) + base_extra_args
+                
+                if strategy_idx == 0:
+                    logger.info(f"[{tid}] Trying player_client={client_name}")
+                else:
+                    logger.info(f"[{tid}] Retry #{strategy_idx} with player_client={client_name}")
+                    with tasks_lock:
+                        tasks[task_id]['phase'] = f'Retrying (attempt {strategy_idx + 1})...'
+                        tasks[task_id]['progress'] = 0
+                    last_log_pct = -10
+                
+                logger.info(f"[{tid}] CMD: {' '.join(cmd[:6])} ... {cmd[-1]}")
+                
+                with tasks_lock:
+                    tasks[task_id]['status'] = 'downloading'
+                    if strategy_idx == 0:
+                        tasks[task_id]['phase'] = 'Downloading...'
+                
+                # Use binary mode + unbuffered to catch \r-separated ffmpeg progress
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    bufsize=0
+                )
+                
+                # Collect all output to check for errors
+                all_output_lines = []
             
-            with tasks_lock:
-                tasks[task_id]['status'] = 'downloading'
-                tasks[task_id]['phase'] = 'Downloading...'
-            
-            # Use binary mode + unbuffered to catch \r-separated ffmpeg progress
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                bufsize=0
-            )
-            
-            # Read byte-by-byte to handle both \r and \n separators
-            # (ffmpeg uses \r for in-place progress, yt-dlp uses \n)
-            buf = b''
-            while True:
-                byte = process.stdout.read(1)
-                if not byte:
-                    break
-                if byte in (b'\r', b'\n'):
-                    if buf:
-                        line = buf.decode('utf-8', errors='replace').strip()
-                        buf = b''
-                        if not line:
-                            continue
-                        
-                        # --- Parse yt-dlp progress-template output ---
-                        if '|' in line and '%' in line:
-                            parts = line.split('|')
-                            if len(parts) >= 5:
-                                try:
-                                    pct = float(parts[0].strip().replace('%', ''))
-                                    speed = parts[1].strip() if parts[1].strip() != 'NA' else ''
-                                    eta = parts[2].strip() if parts[2].strip() != 'NA' else ''
-                                    total_size = parts[3].strip() if parts[3].strip() != 'NA' else ''
-                                    downloaded = parts[4].strip() if parts[4].strip() != 'NA' else ''
+                # Read byte-by-byte to handle both \r and \n separators
+                # (ffmpeg uses \r for in-place progress, yt-dlp uses \n)
+                buf = b''
+                while True:
+                    byte = process.stdout.read(1)
+                    if not byte:
+                        break
+                    if byte in (b'\r', b'\n'):
+                        if buf:
+                            line = buf.decode('utf-8', errors='replace').strip()
+                            buf = b''
+                            if not line:
+                                continue
+                            
+                            all_output_lines.append(line)
+                            
+                            # --- Parse yt-dlp progress-template output ---
+                            if '|' in line and '%' in line:
+                                parts = line.split('|')
+                                if len(parts) >= 5:
+                                    try:
+                                        pct = float(parts[0].strip().replace('%', ''))
+                                        speed = parts[1].strip() if parts[1].strip() != 'NA' else ''
+                                        eta = parts[2].strip() if parts[2].strip() != 'NA' else ''
+                                        total_size = parts[3].strip() if parts[3].strip() != 'NA' else ''
+                                        downloaded = parts[4].strip() if parts[4].strip() != 'NA' else ''
+                                        with tasks_lock:
+                                            tasks[task_id]['progress'] = min(pct, 100)
+                                            tasks[task_id]['speed'] = speed
+                                            tasks[task_id]['eta'] = eta
+                                            tasks[task_id]['size'] = total_size
+                                            tasks[task_id]['downloaded'] = downloaded
+                                        # Pip-style log every 10%
+                                        if pct >= last_log_pct + 10 or pct >= 100:
+                                            bar = _progress_bar(pct)
+                                            logger.info(f"[{tid}] {bar} {pct:5.1f}% | {speed or '-':>10} | ETA {eta or '-':>6} | {downloaded or '-'}/{total_size or '-'}")
+                                            last_log_pct = pct
+                                    except (ValueError, IndexError):
+                                        pass
+                            
+                            # --- Parse ffmpeg time= output (main progress source for --download-sections) ---
+                            elif 'time=' in line and 'speed=' in line:
+                                time_match = re.search(r'time=(\d+):(\d+):(\d+\.?\d*)', line)
+                                speed_match = re.search(r'speed=\s*(\S+)', line)
+                                size_match = re.search(r'size=\s*(\S+)', line)
+                                if time_match and trim_duration > 0:
+                                    t_h, t_m, t_s = int(time_match.group(1)), int(time_match.group(2)), float(time_match.group(3))
+                                    current_sec = t_h * 3600 + t_m * 60 + t_s
+                                    pct = min((current_sec / trim_duration) * 90, 90)  # Cap at 90%, post-processing takes 90-100
+                                    ffmpeg_speed = speed_match.group(1) if speed_match else ''
+                                    ffmpeg_size = size_match.group(1) if size_match else ''
+                                    remaining = trim_duration - current_sec
+                                    with tasks_lock:
+                                        tasks[task_id]['progress'] = pct
+                                        tasks[task_id]['speed'] = ffmpeg_speed
+                                        tasks[task_id]['eta'] = f'{remaining:.0f}s' if remaining > 0 else '0s'
+                                        tasks[task_id]['size'] = ffmpeg_size
+                                        tasks[task_id]['phase'] = f'Processing... {pct:.0f}%'
+                                    # Pip-style log every 10%
+                                    if pct >= last_log_pct + 10:
+                                        bar = _progress_bar(pct)
+                                        logger.info(f"[{tid}] {bar} {pct:5.1f}% | {ffmpeg_speed:>10} | ~{remaining:.0f}s left | {ffmpeg_size}")
+                                        last_log_pct = pct
+                            
+                            # --- Parse [download] fallback ---
+                            elif '[download]' in line and '%' in line:
+                                match = re.search(r'(\d+\.?\d*)%', line)
+                                if match:
+                                    pct = float(match.group(1))
                                     with tasks_lock:
                                         tasks[task_id]['progress'] = min(pct, 100)
-                                        tasks[task_id]['speed'] = speed
-                                        tasks[task_id]['eta'] = eta
-                                        tasks[task_id]['size'] = total_size
-                                        tasks[task_id]['downloaded'] = downloaded
-                                    # Pip-style log every 10%
-                                    if pct >= last_log_pct + 10 or pct >= 100:
-                                        bar = _progress_bar(pct)
-                                        logger.info(f"[{tid}] {bar} {pct:5.1f}% | {speed or '-':>10} | ETA {eta or '-':>6} | {downloaded or '-'}/{total_size or '-'}")
-                                        last_log_pct = pct
-                                except (ValueError, IndexError):
-                                    pass
-                        
-                        # --- Parse ffmpeg time= output (main progress source for --download-sections) ---
-                        elif 'time=' in line and 'speed=' in line:
-                            time_match = re.search(r'time=(\d+):(\d+):(\d+\.?\d*)', line)
-                            speed_match = re.search(r'speed=\s*(\S+)', line)
-                            size_match = re.search(r'size=\s*(\S+)', line)
-                            if time_match and trim_duration > 0:
-                                t_h, t_m, t_s = int(time_match.group(1)), int(time_match.group(2)), float(time_match.group(3))
-                                current_sec = t_h * 3600 + t_m * 60 + t_s
-                                pct = min((current_sec / trim_duration) * 90, 90)  # Cap at 90%, post-processing takes 90-100
-                                ffmpeg_speed = speed_match.group(1) if speed_match else ''
-                                ffmpeg_size = size_match.group(1) if size_match else ''
-                                remaining = trim_duration - current_sec
+                            
+                            # --- Detect post-processing ---
+                            elif '[Merger]' in line or '[ExtractAudio]' in line or '[ffmpeg]' in line:
+                                logger.info(f"[{tid}] ⚙ Post-processing...")
                                 with tasks_lock:
-                                    tasks[task_id]['progress'] = pct
-                                    tasks[task_id]['speed'] = ffmpeg_speed
-                                    tasks[task_id]['eta'] = f'{remaining:.0f}s' if remaining > 0 else '0s'
-                                    tasks[task_id]['size'] = ffmpeg_size
-                                    tasks[task_id]['phase'] = f'Processing... {pct:.0f}%'
-                                # Pip-style log every 10%
-                                if pct >= last_log_pct + 10:
-                                    bar = _progress_bar(pct)
-                                    logger.info(f"[{tid}] {bar} {pct:5.1f}% | {ffmpeg_speed:>10} | ~{remaining:.0f}s left | {ffmpeg_size}")
-                                    last_log_pct = pct
-                        
-                        # --- Parse [download] fallback ---
-                        elif '[download]' in line and '%' in line:
-                            match = re.search(r'(\d+\.?\d*)%', line)
-                            if match:
-                                pct = float(match.group(1))
-                                with tasks_lock:
-                                    tasks[task_id]['progress'] = min(pct, 100)
-                        
-                        # --- Detect post-processing ---
-                        elif '[Merger]' in line or '[ExtractAudio]' in line or '[ffmpeg]' in line:
-                            logger.info(f"[{tid}] ⚙ Post-processing...")
-                            with tasks_lock:
-                                tasks[task_id]['phase'] = 'Merging & processing...'
-                                tasks[task_id]['progress'] = 95
-                        
-                        # --- Log important yt-dlp info lines (not progress noise) ---
-                        elif line.startswith('[') and 'download' not in line.lower():
-                            logger.info(f"[{tid}] {line}")
-                else:
-                    buf += byte
-            
-            process.wait()
-            dl_elapsed = round(time.time() - dl_start_time, 2)
-            
-            if process.returncode != 0:
-                logger.error(f"[{tid}] ✘ FAILED | exit={process.returncode} | {dl_elapsed}s")
-                with tasks_lock:
-                    tasks[task_id]['status'] = 'error'
-                    tasks[task_id]['error'] = 'Failed to trim video. Check video availability.'
-                return
+                                    tasks[task_id]['phase'] = 'Merging & processing...'
+                                    tasks[task_id]['progress'] = 95
+                            
+                            # --- Log important yt-dlp info lines (not progress noise) ---
+                            elif line.startswith('[') and 'download' not in line.lower():
+                                logger.info(f"[{tid}] {line}")
+                    else:
+                        buf += byte
+                
+                process.wait()
+                dl_elapsed = round(time.time() - dl_start_time, 2)
+                
+                if process.returncode != 0:
+                    # Check if this is a retriable error (bot detection / format issue)
+                    all_output = ' '.join(all_output_lines).lower()
+                    is_retriable = any(kw in all_output for kw in [
+                        'sign in', 'bot', 'confirm', 'cookies', 'authentication',
+                        'requested format', 'not available', 'format is not',
+                        'no video formats', 'unavailable',
+                    ])
+                    
+                    if is_retriable and strategy_idx < len(PLAYER_CLIENT_STRATEGIES) - 1:
+                        logger.warning(f"[{tid}] ✘ player_client={client_name} failed (retriable) | exit={process.returncode} | {dl_elapsed:.1f}s")
+                        logger.info(f"[{tid}] Waiting 2s before trying next client...")
+                        # Clean any partial files before retry
+                        for f in os.listdir(tmpdir):
+                            fpath = os.path.join(tmpdir, f)
+                            if os.path.isfile(fpath):
+                                os.remove(fpath)
+                        time.sleep(2)
+                        continue  # Try next player client
+                    
+                    logger.error(f"[{tid}] ✘ FAILED | exit={process.returncode} | {dl_elapsed}s")
+                    with tasks_lock:
+                        tasks[task_id]['status'] = 'error'
+                        tasks[task_id]['error'] = 'Failed to trim video. Check video availability.'
+                    return
+                
+                # Success! Break out of retry loop
+                logger.info(f"[{tid}] ✔ player_client={client_name} succeeded")
+                break
             
             # Find the actual output file
             actual_file = None
