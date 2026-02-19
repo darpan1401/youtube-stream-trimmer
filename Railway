@@ -1,0 +1,3 @@
+# Railway deployment configuration
+# This file tells Railway how to run your app
+web: python app_new.py
