@@ -130,6 +130,15 @@ def get_ytdlp_base_args(player_client=None):
         '--socket-timeout', '30',
         '--extractor-retries', '5',
     ]
+
+    # Realistic browser headers to avoid bot fingerprinting
+    args.extend([
+        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        '--referer', 'https://www.youtube.com/',
+        '--add-header', 'Accept-Language:en-US,en;q=0.9',
+        '--add-header', 'Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    ])
+
     # Use Node.js as JS runtime for yt-dlp (required for YouTube PO token generation)
     if NODE_AVAILABLE:
         args.extend(['--js-runtimes', 'node'])
@@ -138,15 +147,16 @@ def get_ytdlp_base_args(player_client=None):
         args.extend(['--extractor-args', f'youtube:player_client={player_client}'])
     return args
 
-# Player client strategies to try (in order)
-# None = no restriction (default, works locally and most servers)
-# Fallback clients are tried only when bot-detection is triggered
+# Player client strategies to try (in order of effectiveness against bot detection)
+# Mobile/creator clients do NOT need PO tokens — best for datacenter IPs
 PLAYER_CLIENT_STRATEGIES = [
-    None,            # Default — no player_client restriction (best compatibility)
-    'mweb',          # Mobile web — often bypasses bot checks
-    'tv_embedded',   # TV embedded player — works on many datacenter IPs
-    'mediaconnect',  # Media connect client
-    'web',           # Web client (needs PO token provider for servers)
+    'web_creator',       # Creator Studio client — bypasses most bot detection (no PO token needed)
+    'ios',               # iOS app client — no PO token, very reliable on datacenter IPs
+    'android',           # Android app client — no PO token, good fallback
+    'mweb',              # Mobile web — often bypasses bot checks
+    'tv_embedded',       # TV embedded player — works on many datacenter IPs
+    'mediaconnect',      # Media connect client
+    None,                # Default (last resort — may trigger bot detection on servers)
 ]
 
 def run_ytdlp_with_retry(extra_args, url, timeout=60, description="yt-dlp"):
@@ -195,7 +205,8 @@ def run_ytdlp_with_retry(extra_args, url, timeout=60, description="yt-dlp"):
                 logger.info(f"{description}: Error is not bot-related, skipping further retries")
                 break
             
-            logger.info(f"{description}: Bot detection detected, will try next client...")
+            logger.info(f"{description}: Bot detection detected, waiting 2s before trying next client...")
+            time.sleep(2)  # Small delay between retries to avoid rate-limiting
         
         except subprocess.TimeoutExpired:
             logger.error(f"{description}: TIMEOUT with player_client={client_name} after {timeout}s")
@@ -402,7 +413,7 @@ def start_trim():
                 tasks[task_id]['status'] = 'downloading'
                 tasks[task_id]['phase'] = 'Preparing download...'
             
-            cmd = get_ytdlp_base_args() + [
+            cmd = get_ytdlp_base_args(player_client='web_creator') + [
                 '-f', quality_map.get(quality, quality_map['best']),
                 '--download-sections', f'*{start_time}-{end_time}',
                 '--fragment-retries', '5',
@@ -737,7 +748,7 @@ def trim_video():
             file_ext = 'mp3' if is_audio else 'mp4'
             output_path = os.path.join(tmpdir, f"{filename}.{file_ext}")
             
-            cmd = get_ytdlp_base_args() + [
+            cmd = get_ytdlp_base_args(player_client='web_creator') + [
                 '-f', quality_map.get(quality, quality_map['best']),
                 '--download-sections', f'*{start_time}-{end_time}',
                 '--concurrent-fragments', '16',
