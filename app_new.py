@@ -13,6 +13,9 @@ import uuid
 import threading
 import time
 import sys
+import urllib.request
+import urllib.parse
+import urllib.error
 
 app = Flask(__name__)
 
@@ -120,6 +123,191 @@ def sanitize_filename(filename):
     """Remove special characters from filename"""
     filename = str(filename)[:100]  # Limit to 100 chars
     return re.sub(r'[<>:"/\\|?*]', '_', filename)
+
+# ==================== PIPED API FALLBACK ====================
+# Piped is an open-source YouTube frontend that proxies requests through its own servers
+# This completely bypasses YouTube bot detection since requests come from Piped's IPs
+
+PIPED_INSTANCES = [
+    'https://pipedapi.kavin.rocks',
+    'https://pipedapi.adminforge.de',
+    'https://pipedapi.in.projectsegfau.lt',
+    'https://api.piped.projectsegfau.lt',
+    'https://pipedapi.leptons.xyz',
+]
+
+def extract_video_id(url):
+    """Extract YouTube video ID from various URL formats"""
+    patterns = [
+        r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/|youtube\.com/v/|youtube\.com/shorts/|youtube\.com/live/)([a-zA-Z0-9_-]{11})',
+        r'(?:youtube\.com/watch\?.*v=)([a-zA-Z0-9_-]{11})',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+def _piped_request(path, instance_url, timeout=20):
+    """Make a GET request to a Piped API instance"""
+    url = f"{instance_url}{path}"
+    req = urllib.request.Request(url, headers={
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Accept': 'application/json',
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode('utf-8'))
+    except Exception as e:
+        logger.debug(f"Piped request failed: {instance_url}{path} | {e}")
+        return None
+
+def get_video_info_piped(video_id):
+    """
+    Get video info from Piped API. Tries multiple instances.
+    Returns dict with title, duration, thumbnail, uploader, videoStreams, audioStreams or None
+    """
+    for instance in PIPED_INSTANCES:
+        logger.info(f"Piped fallback: Trying {instance} for video {video_id}")
+        data = _piped_request(f'/streams/{video_id}', instance, timeout=20)
+        if data and 'title' in data:
+            logger.info(f"Piped fallback: SUCCESS via {instance} | Title: {data.get('title', '?')[:60]}")
+            return {
+                'title': data.get('title', 'Video'),
+                'duration': data.get('duration', 0),
+                'thumbnail': data.get('thumbnailUrl', ''),
+                'uploader': data.get('uploader', 'Unknown'),
+                'videoStreams': data.get('videoStreams', []),
+                'audioStreams': data.get('audioStreams', []),
+                'piped_instance': instance,
+            }
+        if data and 'error' in data:
+            logger.warning(f"Piped fallback: {instance} returned error: {data['error']}")
+    
+    logger.error(f"Piped fallback: ALL instances failed for video {video_id}")
+    return None
+
+def get_best_stream_urls(piped_data, quality='best', audio_only=False):
+    """
+    Pick the best video + audio stream URLs from Piped data.
+    Returns (video_url, audio_url) or (None, audio_url) for audio_only.
+    """
+    audio_streams = piped_data.get('audioStreams', [])
+    video_streams = piped_data.get('videoStreams', [])
+    
+    # Pick best audio (highest bitrate, prefer m4a/mp4)
+    best_audio = None
+    best_audio_bitrate = 0
+    for s in audio_streams:
+        if not s.get('url'):
+            continue
+        bitrate = s.get('bitrate', 0)
+        mime = s.get('mimeType', '')
+        # Prefer mp4/m4a audio
+        bonus = 1000 if ('mp4' in mime or 'm4a' in mime) else 0
+        if bitrate + bonus > best_audio_bitrate + (1000 if best_audio and ('mp4' in best_audio.get('mimeType','')) else 0):
+            best_audio = s
+            best_audio_bitrate = bitrate
+    
+    if audio_only:
+        return None, best_audio.get('url') if best_audio else None
+    
+    # Pick best video matching quality
+    height_map = {'best': 9999, '1080': 1080, '720': 720, '480': 480}
+    max_height = height_map.get(quality, 9999)
+    
+    # Filter video-only streams (not audioVideo combined which are usually lower quality)
+    best_video = None
+    best_video_score = -1
+    for s in video_streams:
+        if not s.get('url'):
+            continue
+        h = s.get('height', 0) or 0
+        if h > max_height:
+            continue
+        fps = s.get('fps', 30) or 30
+        mime = s.get('mimeType', '')
+        # Prefer mp4
+        mime_bonus = 1000 if 'mp4' in mime else 0
+        score = h * 100 + fps + mime_bonus
+        if score > best_video_score:
+            best_video = s
+            best_video_score = score
+    
+    video_url = best_video.get('url') if best_video else None
+    audio_url = best_audio.get('url') if best_audio else None
+    
+    if best_video:
+        logger.info(f"Piped stream: Video {best_video.get('height','?')}p {best_video.get('fps','?')}fps | Audio {best_audio_bitrate}bps")
+    
+    return video_url, audio_url
+
+def trim_with_ffmpeg_streams(video_url, audio_url, output_path, start_time, end_time, is_audio=False):
+    """
+    Download and trim using ffmpeg directly from stream URLs.
+    This is the Piped fallback — works from any IP since URLs are proxied.
+    Returns (success, error_message)
+    """
+    duration = end_time - start_time
+    
+    if is_audio:
+        if not audio_url:
+            return False, "No audio stream available"
+        cmd = [
+            'ffmpeg', '-y',
+            '-ss', str(start_time),
+            '-t', str(duration),
+            '-i', audio_url,
+            '-vn',
+            '-acodec', 'libmp3lame',
+            '-ab', '192k',
+            '-f', 'mp3',
+            output_path
+        ]
+    else:
+        if not video_url:
+            return False, "No video stream available"
+        
+        cmd = ['ffmpeg', '-y', '-ss', str(start_time), '-t', str(duration)]
+        
+        # Add video input
+        cmd.extend(['-i', video_url])
+        
+        # Add audio input if available
+        if audio_url:
+            cmd.extend(['-ss', str(start_time), '-t', str(duration), '-i', audio_url])
+            cmd.extend([
+                '-map', '0:v:0', '-map', '1:a:0',
+                '-c:v', 'copy', '-c:a', 'aac',
+                '-movflags', '+faststart',
+                '-f', 'mp4',
+                output_path
+            ])
+        else:
+            cmd.extend([
+                '-c:v', 'copy',
+                '-movflags', '+faststart',
+                '-f', 'mp4',
+                output_path
+            ])
+    
+    logger.info(f"ffmpeg direct trim: {' '.join(cmd[:8])} ...")
+    
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            logger.info(f"ffmpeg direct trim: SUCCESS | {os.path.getsize(output_path) / (1024*1024):.2f} MB")
+            return True, None
+        else:
+            stderr = result.stderr[-300:] if result.stderr else 'no stderr'
+            logger.error(f"ffmpeg direct trim: FAILED | exit={result.returncode} | {stderr}")
+            return False, f"ffmpeg failed: {stderr[:100]}"
+    except subprocess.TimeoutExpired:
+        logger.error("ffmpeg direct trim: TIMEOUT after 600s")
+        return False, "Processing timeout"
+    except Exception as e:
+        logger.error(f"ffmpeg direct trim: EXCEPTION: {e}")
+        return False, str(e)
 
 def get_ytdlp_base_args(player_client=None):
     """Return common yt-dlp arguments with anti-bot measures"""
@@ -259,7 +447,7 @@ def index():
 @app.route('/api/get-video-info', methods=['POST'])
 @error_handler
 def get_video_info():
-    """Fetch video info using yt-dlp"""
+    """Fetch video info using yt-dlp, with Piped API fallback"""
     req_start = time.time()
     url = request.json.get('url', '').strip()
     
@@ -273,6 +461,8 @@ def get_video_info():
     
     logger.info(f"▶ get_video_info START | URL: {url} | IP: {request.remote_addr}")
     
+    # === ATTEMPT 1: yt-dlp (fastest, best quality info) ===
+    ytdlp_failed = False
     try:
         extra_args = ['--dump-json', '--no-warnings']
         
@@ -280,65 +470,65 @@ def get_video_info():
             extra_args, url, timeout=60, description="get_video_info"
         )
         
-        if not success:
-            if result is None:
-                return jsonify({"error": "Request timeout. The server is slow — please try again."}), 408
+        if success:
+            data = json.loads(result.stdout)
+            duration = int(data.get("duration", 0))
+            title = sanitize_filename(data.get("title", "Video"))
+            uploader = data.get("uploader", "Unknown")
             
-            stderr_output = result.stderr.strip() if result and result.stderr else 'Unknown error'
-            stderr_lower = stderr_output.lower()
-            
-            if 'sign in' in stderr_lower or 'bot' in stderr_lower:
-                error_msg = "YouTube bot detection triggered. Please try again in a moment."
-            elif 'age' in stderr_lower:
-                error_msg = "This video requires age verification and cannot be processed."
-            elif 'private' in stderr_lower:
-                error_msg = "This video is private"
-            elif 'unavailable' in stderr_lower or 'not available' in stderr_lower:
-                error_msg = "Video unavailable or region-restricted"
-            elif 'copyright' in stderr_lower:
-                error_msg = "Video blocked due to copyright"
-            elif 'live' in stderr_lower and 'not started' in stderr_lower:
-                error_msg = "Live stream has not started yet"
-            elif 'urlopen error' in stderr_lower or 'connection' in stderr_lower:
-                error_msg = "Network error — could not reach YouTube. Please try again."
-            elif 'http error 429' in stderr_lower or 'too many' in stderr_lower:
-                error_msg = "YouTube is rate-limiting requests. Try again in a few minutes."
+            if duration > 0:
+                elapsed = round(time.time() - req_start, 2)
+                logger.info(f"✔ get_video_info SUCCESS (yt-dlp) in {elapsed}s | Title: '{title}' | Duration: {duration}s")
+                
+                return jsonify({
+                    "success": True,
+                    "title": title,
+                    "duration": duration,
+                    "thumbnail": data.get("thumbnail", ""),
+                    "uploader": uploader
+                })
             else:
-                error_msg = "Invalid YouTube URL or video unavailable"
-            
-            return jsonify({"error": error_msg}), 400
-        
-        data = json.loads(result.stdout)
-        duration = int(data.get("duration", 0))
-        title = sanitize_filename(data.get("title", "Video"))
-        uploader = data.get("uploader", "Unknown")
-        
-        if duration <= 0:
-            logger.warning(f"Video has zero/negative duration: {url} | duration={duration}")
-            return jsonify({"error": "Could not determine video duration (live stream or invalid)"}), 400
-        
-        elapsed = round(time.time() - req_start, 2)
-        logger.info(f"✔ get_video_info SUCCESS in {elapsed}s | Title: '{title}' | Duration: {duration}s | Uploader: {uploader}")
-        
-        return jsonify({
-            "success": True,
-            "title": title,
-            "duration": duration,
-            "thumbnail": data.get("thumbnail", ""),
-            "uploader": uploader
-        })
-    
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse yt-dlp JSON output | URL: {url} | Error: {e}")
-        logger.error(f"Raw stdout (first 500 chars): {result.stdout[:500] if result and result.stdout else 'empty'}")
-        return jsonify({"error": "Failed to parse video information"}), 400
-    except FileNotFoundError:
-        logger.critical("yt-dlp binary NOT FOUND on this system!")
-        return jsonify({"error": "Server configuration error — yt-dlp not installed"}), 500
+                logger.warning(f"yt-dlp returned zero duration, trying Piped fallback")
+                ytdlp_failed = True
+        else:
+            ytdlp_failed = True
+            logger.warning(f"yt-dlp failed for {url}, trying Piped API fallback...")
     except Exception as e:
-        logger.error(f"Unexpected error fetching video | URL: {url} | Error: {type(e).__name__}: {e}")
-        logger.error(traceback.format_exc())
-        return jsonify({"error": "Failed to fetch video information"}), 400
+        ytdlp_failed = True
+        logger.warning(f"yt-dlp exception: {e}, trying Piped API fallback...")
+    
+    # === ATTEMPT 2: Piped API (fallback — bypasses YouTube bot detection) ===
+    if ytdlp_failed:
+        video_id = extract_video_id(url)
+        if not video_id:
+            logger.error(f"Could not extract video ID from URL: {url}")
+            return jsonify({"error": "Invalid YouTube URL — could not extract video ID"}), 400
+        
+        logger.info(f"▶ Piped API fallback for video: {video_id}")
+        piped_data = get_video_info_piped(video_id)
+        
+        if piped_data and piped_data.get('duration', 0) > 0:
+            title = sanitize_filename(piped_data.get('title', 'Video'))
+            duration = int(piped_data['duration'])
+            uploader = piped_data.get('uploader', 'Unknown')
+            
+            elapsed = round(time.time() - req_start, 2)
+            logger.info(f"✔ get_video_info SUCCESS (Piped) in {elapsed}s | Title: '{title}' | Duration: {duration}s")
+            
+            return jsonify({
+                "success": True,
+                "title": title,
+                "duration": duration,
+                "thumbnail": piped_data.get('thumbnail', ''),
+                "uploader": uploader,
+                "source": "piped"  # Frontend can use this to know Piped was used
+            })
+        
+        # Both methods failed
+        logger.error(f"Both yt-dlp and Piped API failed for URL: {url}")
+        return jsonify({"error": "Could not load video. YouTube may be blocking this server. Please try again later."}), 400
+    
+    return jsonify({"error": "Failed to fetch video information"}), 400
 
 @app.route('/api/start-trim', methods=['POST'])
 @error_handler
@@ -588,10 +778,56 @@ def start_trim():
                         time.sleep(2)
                         continue  # Try next player client
                     
-                    logger.error(f"[{tid}] ✘ FAILED | exit={process.returncode} | {dl_elapsed}s")
+                    logger.error(f"[{tid}] ✘ yt-dlp FAILED with all strategies | exit={process.returncode} | {dl_elapsed}s")
+                    
+                    # === PIPED API FALLBACK ===
+                    logger.info(f"[{tid}] 🔄 Trying Piped API fallback for trim...")
+                    with tasks_lock:
+                        tasks[task_id]['phase'] = 'Switching to backup method...'
+                        tasks[task_id]['progress'] = 0
+                    
+                    video_id = extract_video_id(url)
+                    if video_id:
+                        piped_data = get_video_info_piped(video_id)
+                        if piped_data:
+                            video_url, audio_url = get_best_stream_urls(piped_data, quality=quality, audio_only=is_audio)
+                            
+                            if video_url or audio_url:
+                                with tasks_lock:
+                                    tasks[task_id]['phase'] = 'Downloading via backup...'
+                                    tasks[task_id]['progress'] = 10
+                                
+                                # Clean any partial files
+                                for f in os.listdir(tmpdir):
+                                    fpath = os.path.join(tmpdir, f)
+                                    if os.path.isfile(fpath):
+                                        os.remove(fpath)
+                                
+                                piped_success, piped_error = trim_with_ffmpeg_streams(
+                                    video_url, audio_url, output_path,
+                                    start_time, end_time, is_audio=is_audio
+                                )
+                                
+                                if piped_success:
+                                    logger.info(f"[{tid}] ✔ Piped fallback SUCCEEDED!")
+                                    with tasks_lock:
+                                        tasks[task_id]['progress'] = 95
+                                        tasks[task_id]['phase'] = 'Finalizing...'
+                                    # Don't return error — let it continue to file detection below
+                                    break  # Exit retry loop, proceed to file detection
+                                else:
+                                    logger.error(f"[{tid}] ✘ Piped fallback also failed: {piped_error}")
+                            else:
+                                logger.error(f"[{tid}] ✘ No suitable streams found from Piped API")
+                        else:
+                            logger.error(f"[{tid}] ✘ Piped API returned no data")
+                    else:
+                        logger.error(f"[{tid}] ✘ Could not extract video ID from URL")
+                    
+                    # Everything truly failed
                     with tasks_lock:
                         tasks[task_id]['status'] = 'error'
-                        tasks[task_id]['error'] = 'Failed to trim video. Check video availability.'
+                        tasks[task_id]['error'] = 'Failed to trim video. All methods exhausted.'
                     return
                 
                 # Success! Break out of retry loop
@@ -599,11 +835,15 @@ def start_trim():
                 break
             
             # Find the actual output file
+            # Check exact output_path first (Piped/ffmpeg writes here), then scan dir (yt-dlp may rename)
             actual_file = None
-            for f in os.listdir(tmpdir):
-                if f.startswith(filename):
-                    actual_file = os.path.join(tmpdir, f)
-                    break
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                actual_file = output_path
+            else:
+                for f in os.listdir(tmpdir):
+                    if f.startswith(filename):
+                        actual_file = os.path.join(tmpdir, f)
+                        break
             
             if not actual_file or not os.path.exists(actual_file):
                 dir_contents = os.listdir(tmpdir) if os.path.exists(tmpdir) else []
